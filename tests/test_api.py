@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from app.main import (  # noqa: E402
     Base,
+    Followup,
     Note,
     SessionLocal,
     User,
@@ -303,3 +304,222 @@ def test_note_creation_time_is_recorded_in_db() -> None:
         note = db.get(Note, note_id)
         assert note is not None
         assert note.created_at is not None
+
+
+def test_create_followup_for_owned_note() -> None:
+    token = _register_and_login("followupowner")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    note = client.post("/notes", json={"value": "needs checkup"}, headers=headers)
+    note_id = note.json()["id"]
+
+    created = client.post(
+        f"/notes/{note_id}/followups",
+        json={
+            "appointment_at": "2030-01-15T10:30:00Z",
+            "description": "Six month follow-up cleaning",
+            "completed_at": None,
+        },
+        headers=headers,
+    )
+    assert created.status_code == 201
+    body = created.json()
+    assert body["id"]
+    assert body["note_id"] == note_id
+    assert body["description"] == "Six month follow-up cleaning"
+    assert body["appointment_at"]
+    assert body["created_at"]
+    assert body["completed_at"] is None
+
+
+def test_create_followup_rejects_unowned_note() -> None:
+    token_a = _register_and_login("followupunowneda")
+    token_b = _register_and_login("followupunownedb")
+    headers_a = {"Authorization": f"Bearer {token_a}"}
+    headers_b = {"Authorization": f"Bearer {token_b}"}
+
+    note = client.post("/notes", json={"value": "private note"}, headers=headers_a)
+    note_id = note.json()["id"]
+
+    response = client.post(
+        f"/notes/{note_id}/followups",
+        json={
+            "appointment_at": "2030-01-15T10:30:00Z",
+            "description": "Unauthorized attempt",
+        },
+        headers=headers_b,
+    )
+    assert response.status_code == 404
+
+
+def test_list_followups_for_user_returns_only_owned_followups() -> None:
+    token_a = _register_and_login("followuplista")
+    token_b = _register_and_login("followuplistb")
+    headers_a = {"Authorization": f"Bearer {token_a}"}
+    headers_b = {"Authorization": f"Bearer {token_b}"}
+
+    note_a = client.post("/notes", json={"value": "note a"}, headers=headers_a).json()["id"]
+    note_b = client.post("/notes", json={"value": "note b"}, headers=headers_b).json()["id"]
+
+    client.post(
+        f"/notes/{note_a}/followups",
+        json={"appointment_at": "2030-01-10T10:00:00Z", "description": "a1"},
+        headers=headers_a,
+    )
+    client.post(
+        f"/notes/{note_b}/followups",
+        json={"appointment_at": "2030-01-11T10:00:00Z", "description": "b1"},
+        headers=headers_b,
+    )
+
+    followups_a = client.get("/followups", headers=headers_a)
+    assert followups_a.status_code == 200
+    assert len(followups_a.json()) == 1
+    assert followups_a.json()[0]["description"] == "a1"
+
+
+def test_list_followups_for_specific_note() -> None:
+    token = _register_and_login("followupnote")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    note1 = client.post("/notes", json={"value": "note 1"}, headers=headers).json()["id"]
+    note2 = client.post("/notes", json={"value": "note 2"}, headers=headers).json()["id"]
+
+    client.post(
+        f"/notes/{note1}/followups",
+        json={"appointment_at": "2030-01-12T09:00:00Z", "description": "n1-f1"},
+        headers=headers,
+    )
+    client.post(
+        f"/notes/{note1}/followups",
+        json={"appointment_at": "2030-01-13T09:00:00Z", "description": "n1-f2"},
+        headers=headers,
+    )
+    client.post(
+        f"/notes/{note2}/followups",
+        json={"appointment_at": "2030-01-14T09:00:00Z", "description": "n2-f1"},
+        headers=headers,
+    )
+
+    listed = client.get(f"/notes/{note1}/followups", headers=headers)
+    assert listed.status_code == 200
+    descriptions = [f["description"] for f in listed.json()]
+    assert descriptions == ["n1-f1", "n1-f2"]
+
+
+def test_followup_endpoints_require_authentication() -> None:
+    assert client.get("/followups").status_code == 401
+    assert (
+        client.post(
+            "/notes/some-note/followups",
+            json={"appointment_at": "2030-01-12T09:00:00Z", "description": "x"},
+        ).status_code
+        == 401
+    )
+    assert client.get("/notes/some-note/followups").status_code == 401
+
+
+def test_followup_validation_for_bad_payloads() -> None:
+    token = _register_and_login("followupvalidation")
+    headers = {"Authorization": f"Bearer {token}"}
+    note_id = client.post("/notes", json={"value": "note"}, headers=headers).json()["id"]
+
+    bad_datetime = client.post(
+        f"/notes/{note_id}/followups",
+        json={"appointment_at": "not-a-datetime", "description": "bad"},
+        headers=headers,
+    )
+    assert bad_datetime.status_code == 422
+
+    too_long_description = client.post(
+        f"/notes/{note_id}/followups",
+        json={"appointment_at": "2030-01-12T09:00:00Z", "description": "a" * 513},
+        headers=headers,
+    )
+    assert too_long_description.status_code == 422
+
+
+def test_followup_creation_time_is_recorded_in_db() -> None:
+    token = _register_and_login("followupdbstamp")
+    headers = {"Authorization": f"Bearer {token}"}
+    note_id = client.post("/notes", json={"value": "note"}, headers=headers).json()["id"]
+
+    created = client.post(
+        f"/notes/{note_id}/followups",
+        json={"appointment_at": "2030-01-12T09:00:00Z", "description": "db check"},
+        headers=headers,
+    )
+    followup_id = created.json()["id"]
+
+    with SessionLocal() as db:
+        followup = db.get(Followup, followup_id)
+        assert followup is not None
+        assert followup.created_at is not None
+
+
+def test_followup_completion_toggle_complete_then_incomplete() -> None:
+    token = _register_and_login("followuptoggle")
+    headers = {"Authorization": f"Bearer {token}"}
+    note_id = client.post("/notes", json={"value": "toggle note"}, headers=headers).json()["id"]
+    followup_id = client.post(
+        f"/notes/{note_id}/followups",
+        json={"appointment_at": "2030-01-12T09:00:00Z", "description": "toggle me"},
+        headers=headers,
+    ).json()["id"]
+
+    complete = client.patch(
+        f"/followups/{followup_id}/completion",
+        json={"is_completed": True},
+        headers=headers,
+    )
+    assert complete.status_code == 200
+    assert complete.json()["completed_at"] is not None
+
+    incomplete = client.patch(
+        f"/followups/{followup_id}/completion",
+        json={"is_completed": False},
+        headers=headers,
+    )
+    assert incomplete.status_code == 200
+    assert incomplete.json()["completed_at"] is None
+
+
+def test_followup_completion_requires_authentication() -> None:
+    response = client.patch(
+        "/followups/some-followup/completion",
+        json={"is_completed": True},
+    )
+    assert response.status_code == 401
+
+
+def test_followup_completion_rejects_unowned_followup() -> None:
+    token_a = _register_and_login("followupcompletea")
+    token_b = _register_and_login("followupcompleteb")
+    headers_a = {"Authorization": f"Bearer {token_a}"}
+    headers_b = {"Authorization": f"Bearer {token_b}"}
+
+    note_id = client.post("/notes", json={"value": "private"}, headers=headers_a).json()["id"]
+    followup_id = client.post(
+        f"/notes/{note_id}/followups",
+        json={"appointment_at": "2030-01-12T09:00:00Z", "description": "private followup"},
+        headers=headers_a,
+    ).json()["id"]
+
+    response = client.patch(
+        f"/followups/{followup_id}/completion",
+        json={"is_completed": True},
+        headers=headers_b,
+    )
+    assert response.status_code == 404
+
+
+def test_followup_completion_rejects_unknown_followup() -> None:
+    token = _register_and_login("followupmissing")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    response = client.patch(
+        "/followups/not-a-real-id/completion",
+        json={"is_completed": True},
+        headers=headers,
+    )
+    assert response.status_code == 404

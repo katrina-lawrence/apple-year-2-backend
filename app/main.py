@@ -45,6 +45,20 @@ class Note(Base):
     )
 
 
+class Followup(Base):
+    __tablename__ = "followups"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, index=True)
+    owner_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    note_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    appointment_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class RegisterRequest(BaseModel):
     username: str = Field(min_length=3, max_length=50)
     password: str = Field(min_length=12)
@@ -95,6 +109,26 @@ class NoteResponse(BaseModel):
     id: str
     value: str
     created_at: datetime
+
+
+class CreateFollowupRequest(BaseModel):
+    appointment_at: datetime
+    description: str = Field(min_length=1, max_length=512)
+    completed_at: datetime | None = None
+
+
+class FollowupResponse(BaseModel):
+    id: str
+    owner_id: str
+    note_id: str
+    appointment_at: datetime
+    description: str
+    created_at: datetime
+    completed_at: datetime | None
+
+
+class FollowupCompletionRequest(BaseModel):
+    is_completed: bool
 
 
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
@@ -338,3 +372,117 @@ def delete_note(
     db.delete(note)
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.post("/notes/{note_id}/followups", response_model=FollowupResponse, status_code=status.HTTP_201_CREATED)
+def create_followup_for_note(
+    note_id: str,
+    payload: CreateFollowupRequest,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+) -> FollowupResponse:
+    note = db.query(Note).filter(Note.id == note_id, Note.owner_id == user_id).first()
+    if note is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Note not found")
+
+    followup = Followup(
+        id=str(uuid4()),
+        owner_id=user_id,
+        note_id=note_id,
+        appointment_at=payload.appointment_at,
+        description=payload.description,
+        completed_at=payload.completed_at,
+    )
+    db.add(followup)
+    db.commit()
+    db.refresh(followup)
+    return FollowupResponse(
+        id=followup.id,
+        owner_id=followup.owner_id,
+        note_id=followup.note_id,
+        appointment_at=followup.appointment_at,
+        description=followup.description,
+        created_at=followup.created_at,
+        completed_at=followup.completed_at,
+    )
+
+
+@app.get("/followups", response_model=list[FollowupResponse])
+def list_followups_for_user(
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+) -> list[FollowupResponse]:
+    followups = (
+        db.query(Followup)
+        .filter(Followup.owner_id == user_id)
+        .order_by(Followup.appointment_at.asc())
+        .all()
+    )
+    return [
+        FollowupResponse(
+            id=f.id,
+            owner_id=f.owner_id,
+            note_id=f.note_id,
+            appointment_at=f.appointment_at,
+            description=f.description,
+            created_at=f.created_at,
+            completed_at=f.completed_at,
+        )
+        for f in followups
+    ]
+
+
+@app.get("/notes/{note_id}/followups", response_model=list[FollowupResponse])
+def list_followups_for_note(
+    note_id: str,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+) -> list[FollowupResponse]:
+    note = db.query(Note).filter(Note.id == note_id, Note.owner_id == user_id).first()
+    if note is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Note not found")
+
+    followups = (
+        db.query(Followup)
+        .filter(Followup.owner_id == user_id, Followup.note_id == note_id)
+        .order_by(Followup.appointment_at.asc())
+        .all()
+    )
+    return [
+        FollowupResponse(
+            id=f.id,
+            owner_id=f.owner_id,
+            note_id=f.note_id,
+            appointment_at=f.appointment_at,
+            description=f.description,
+            created_at=f.created_at,
+            completed_at=f.completed_at,
+        )
+        for f in followups
+    ]
+
+
+@app.patch("/followups/{followup_id}/completion", response_model=FollowupResponse)
+def set_followup_completion(
+    followup_id: str,
+    payload: FollowupCompletionRequest,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+) -> FollowupResponse:
+    followup = db.query(Followup).filter(Followup.id == followup_id, Followup.owner_id == user_id).first()
+    if followup is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Followup not found")
+
+    followup.completed_at = datetime.now(timezone.utc) if payload.is_completed else None
+    db.add(followup)
+    db.commit()
+    db.refresh(followup)
+    return FollowupResponse(
+        id=followup.id,
+        owner_id=followup.owner_id,
+        note_id=followup.note_id,
+        appointment_at=followup.appointment_at,
+        description=followup.description,
+        created_at=followup.created_at,
+        completed_at=followup.completed_at,
+    )
