@@ -1,0 +1,211 @@
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+TEST_DB_PATH = Path("/workspace/test_app.db")
+if TEST_DB_PATH.exists():
+    TEST_DB_PATH.unlink()
+os.environ["DATABASE_URL"] = f"sqlite:///{TEST_DB_PATH}"
+
+from fastapi.testclient import TestClient  # noqa: E402
+
+from app.main import (  # noqa: E402
+    Base,
+    SessionLocal,
+    User,
+    app,
+    engine,
+    validate_password,
+    verify_password,
+)
+
+
+client = TestClient(app)
+Base.metadata.drop_all(bind=engine)
+Base.metadata.create_all(bind=engine)
+
+
+def test_status_endpoint() -> None:
+    response = client.get("/status")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
+def test_register_login_and_user_flow() -> None:
+    register = client.post(
+        "/register", json={"username": "alice", "password": "supersecret123"}
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user_id"]
+
+    login = client.post(
+        "/login", json={"username": "alice", "password": "supersecret123"}
+    )
+    assert login.status_code == 200
+    token = login.json()["access_token"]
+    refresh_token = login.json()["refresh_token"]
+    assert refresh_token
+
+    me = client.get("/user", headers={"Authorization": f"Bearer {token}"})
+    assert me.status_code == 200
+    assert me.json() == {"user_id": user_id}
+
+    refreshed = client.post("/refresh", json={"refresh_token": refresh_token})
+    assert refreshed.status_code == 200
+    assert refreshed.json().get("access_token")
+
+
+def test_user_requires_authentication() -> None:
+    response = client.get("/user")
+    assert response.status_code == 401
+
+
+def test_login_rejects_bad_credentials() -> None:
+    register = client.post(
+        "/register", json={"username": "bob", "password": "anothersecret123"}
+    )
+    assert register.status_code == 201
+
+    login = client.post(
+        "/login", json={"username": "bob", "password": "wrong-password"}
+    )
+    assert login.status_code == 401
+
+
+def test_register_rejects_duplicate_username() -> None:
+    first = client.post("/register", json={"username": "chris", "password": "123456789012"})
+    assert first.status_code == 201
+
+    second = client.post("/register", json={"username": "chris", "password": "abcdefghijkl"})
+    assert second.status_code == 409
+
+
+def test_password_is_stored_hashed() -> None:
+    raw_password = "verysecret123"
+    register = client.post(
+        "/register", json={"username": "dana", "password": raw_password}
+    )
+    assert register.status_code == 201
+    user_id = register.json()["user_id"]
+
+    with SessionLocal() as db:
+        user = db.get(User, user_id)
+        assert user is not None
+        assert user.password_hash != raw_password
+        assert verify_password(raw_password, user.password_hash)
+
+
+def test_register_rejects_password_shorter_than_12() -> None:
+    response = client.post(
+        "/register", json={"username": "shortpass", "password": "short123"}
+    )
+    assert response.status_code == 422
+
+
+def test_register_accepts_password_with_length_12() -> None:
+    response = client.post(
+        "/register", json={"username": "length12", "password": "123456789012"}
+    )
+    assert response.status_code == 201
+
+
+def test_validate_password_extension_point_allows_current_valid_password() -> None:
+    validate_password("this-is-valid-12")
+
+
+def test_change_password_success_and_new_password_works() -> None:
+    register = client.post(
+        "/register", json={"username": "pwchange", "password": "initialpass123"}
+    )
+    assert register.status_code == 201
+
+    login = client.post(
+        "/login", json={"username": "pwchange", "password": "initialpass123"}
+    )
+    assert login.status_code == 200
+    token = login.json()["access_token"]
+
+    change = client.post(
+        "/change-password",
+        json={"current_password": "initialpass123", "new_password": "newpassword123"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert change.status_code == 200
+    assert change.json() == {"status": "ok"}
+
+    old_login = client.post(
+        "/login", json={"username": "pwchange", "password": "initialpass123"}
+    )
+    assert old_login.status_code == 401
+
+    new_login = client.post(
+        "/login", json={"username": "pwchange", "password": "newpassword123"}
+    )
+    assert new_login.status_code == 200
+
+
+def test_refresh_rejects_access_token() -> None:
+    register = client.post(
+        "/register", json={"username": "refreshbad", "password": "initialpass123"}
+    )
+    assert register.status_code == 201
+
+    login = client.post(
+        "/login", json={"username": "refreshbad", "password": "initialpass123"}
+    )
+    access_token = login.json()["access_token"]
+
+    response = client.post("/refresh", json={"refresh_token": access_token})
+    assert response.status_code == 401
+
+
+def test_refresh_rejects_invalid_token() -> None:
+    response = client.post("/refresh", json={"refresh_token": "not-a-real-token"})
+    assert response.status_code == 401
+
+
+def test_change_password_rejects_wrong_current_password() -> None:
+    register = client.post(
+        "/register", json={"username": "wrongcurrent", "password": "initialpass123"}
+    )
+    assert register.status_code == 201
+
+    login = client.post(
+        "/login", json={"username": "wrongcurrent", "password": "initialpass123"}
+    )
+    token = login.json()["access_token"]
+
+    response = client.post(
+        "/change-password",
+        json={"current_password": "nottherightone", "new_password": "newpassword123"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 401
+
+
+def test_change_password_requires_authentication() -> None:
+    response = client.post(
+        "/change-password",
+        json={"current_password": "initialpass123", "new_password": "newpassword123"},
+    )
+    assert response.status_code == 401
+
+
+def test_change_password_rejects_short_new_password() -> None:
+    register = client.post(
+        "/register", json={"username": "shortnewpass", "password": "initialpass123"}
+    )
+    assert register.status_code == 201
+
+    login = client.post(
+        "/login", json={"username": "shortnewpass", "password": "initialpass123"}
+    )
+    token = login.json()["access_token"]
+
+    response = client.post(
+        "/change-password",
+        json={"current_password": "initialpass123", "new_password": "short123"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 422
