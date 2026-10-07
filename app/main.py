@@ -6,11 +6,11 @@ from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import jwt
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Response, status
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel, Field
 from pwdlib import PasswordHash
-from sqlalchemy import String, create_engine
+from sqlalchemy import DateTime, String, Text, create_engine, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY") or secrets.token_urlsafe(64)
@@ -32,6 +32,17 @@ class User(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, index=True)
     username: Mapped[str] = mapped_column(String(50), nullable=False, unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+class Note(Base):
+    __tablename__ = "notes"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, index=True)
+    owner_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
 
 
 class RegisterRequest(BaseModel):
@@ -74,6 +85,16 @@ class UserResponse(BaseModel):
 
 class StatusResponse(BaseModel):
     status: str
+
+
+class NoteWriteRequest(BaseModel):
+    value: str = Field(min_length=1, max_length=512)
+
+
+class NoteResponse(BaseModel):
+    id: str
+    value: str
+    created_at: datetime
 
 
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
@@ -252,3 +273,68 @@ def change_password(
     db.add(user)
     db.commit()
     return StatusResponse(status="ok")
+
+
+@app.post("/notes", response_model=NoteResponse, status_code=status.HTTP_201_CREATED)
+def create_note(
+    payload: NoteWriteRequest,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+) -> NoteResponse:
+    note = Note(id=str(uuid4()), owner_id=user_id, value=payload.value)
+    db.add(note)
+    db.commit()
+    db.refresh(note)
+    return NoteResponse(id=note.id, value=note.value, created_at=note.created_at)
+
+
+@app.get("/notes", response_model=list[NoteResponse])
+def list_notes(
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+) -> list[NoteResponse]:
+    notes = db.query(Note).filter(Note.owner_id == user_id).order_by(Note.created_at.desc()).all()
+    return [NoteResponse(id=n.id, value=n.value, created_at=n.created_at) for n in notes]
+
+
+@app.get("/notes/{note_id}", response_model=NoteResponse)
+def get_note(
+    note_id: str,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+) -> NoteResponse:
+    note = db.query(Note).filter(Note.id == note_id, Note.owner_id == user_id).first()
+    if note is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Note not found")
+    return NoteResponse(id=note.id, value=note.value, created_at=note.created_at)
+
+
+@app.put("/notes/{note_id}", response_model=NoteResponse)
+def update_note(
+    note_id: str,
+    payload: NoteWriteRequest,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+) -> NoteResponse:
+    note = db.query(Note).filter(Note.id == note_id, Note.owner_id == user_id).first()
+    if note is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Note not found")
+    note.value = payload.value
+    db.add(note)
+    db.commit()
+    db.refresh(note)
+    return NoteResponse(id=note.id, value=note.value, created_at=note.created_at)
+
+
+@app.delete("/notes/{note_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_note(
+    note_id: str,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+) -> Response:
+    note = db.query(Note).filter(Note.id == note_id, Note.owner_id == user_id).first()
+    if note is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Note not found")
+    db.delete(note)
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

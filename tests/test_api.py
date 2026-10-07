@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from app.main import (  # noqa: E402
     Base,
+    Note,
     SessionLocal,
     User,
     app,
@@ -209,3 +210,96 @@ def test_change_password_rejects_short_new_password() -> None:
         headers={"Authorization": f"Bearer {token}"},
     )
     assert response.status_code == 422
+
+
+def _register_and_login(username: str, password: str = "initialpass123") -> str:
+    register = client.post("/register", json={"username": username, "password": password})
+    assert register.status_code == 201
+    login = client.post("/login", json={"username": username, "password": password})
+    assert login.status_code == 200
+    return login.json()["access_token"]
+
+
+def test_notes_crud_flow_for_owner() -> None:
+    token = _register_and_login("notesowner")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    create = client.post("/notes", json={"value": "first note"}, headers=headers)
+    assert create.status_code == 201
+    created = create.json()
+    note_id = created["id"]
+    assert created["value"] == "first note"
+    assert created["created_at"]
+
+    fetched = client.get(f"/notes/{note_id}", headers=headers)
+    assert fetched.status_code == 200
+    assert fetched.json()["id"] == note_id
+    assert fetched.json()["value"] == "first note"
+
+    listed = client.get("/notes", headers=headers)
+    assert listed.status_code == 200
+    assert any(note["id"] == note_id for note in listed.json())
+
+    updated = client.put(f"/notes/{note_id}", json={"value": "updated note"}, headers=headers)
+    assert updated.status_code == 200
+    assert updated.json()["id"] == note_id
+    assert updated.json()["value"] == "updated note"
+
+    deleted = client.delete(f"/notes/{note_id}", headers=headers)
+    assert deleted.status_code == 204
+
+    fetch_after_delete = client.get(f"/notes/{note_id}", headers=headers)
+    assert fetch_after_delete.status_code == 404
+
+
+def test_notes_enforce_owner_isolation() -> None:
+    token_a = _register_and_login("ownera")
+    token_b = _register_and_login("ownerb")
+    headers_a = {"Authorization": f"Bearer {token_a}"}
+    headers_b = {"Authorization": f"Bearer {token_b}"}
+
+    created = client.post("/notes", json={"value": "private"}, headers=headers_a)
+    note_id = created.json()["id"]
+
+    get_other = client.get(f"/notes/{note_id}", headers=headers_b)
+    assert get_other.status_code == 404
+
+    update_other = client.put(f"/notes/{note_id}", json={"value": "hijack"}, headers=headers_b)
+    assert update_other.status_code == 404
+
+    delete_other = client.delete(f"/notes/{note_id}", headers=headers_b)
+    assert delete_other.status_code == 404
+
+
+def test_notes_require_authentication() -> None:
+    assert client.get("/notes").status_code == 401
+    assert client.post("/notes", json={"value": "test"}).status_code == 401
+    assert client.get("/notes/some-id").status_code == 401
+    assert client.put("/notes/some-id", json={"value": "test"}).status_code == 401
+    assert client.delete("/notes/some-id").status_code == 401
+
+
+def test_note_value_max_length_validation() -> None:
+    token = _register_and_login("maxlength")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    ok_value = "a" * 512
+    too_long = "b" * 513
+
+    ok_create = client.post("/notes", json={"value": ok_value}, headers=headers)
+    assert ok_create.status_code == 201
+
+    bad_create = client.post("/notes", json={"value": too_long}, headers=headers)
+    assert bad_create.status_code == 422
+
+
+def test_note_creation_time_is_recorded_in_db() -> None:
+    token = _register_and_login("createdattest")
+    headers = {"Authorization": f"Bearer {token}"}
+    created = client.post("/notes", json={"value": "timestamp note"}, headers=headers)
+    note_id = created.json()["id"]
+
+    with SessionLocal() as db:
+        note = db.get(Note, note_id)
+        assert note is not None
+        assert note.created_at is not None

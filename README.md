@@ -26,6 +26,36 @@ pip install -e '.[dev]'
 uvicorn app.main:app --reload
 ```
 
+## Run With Docker
+
+Docker Compose is optional. Plain Docker works directly.
+
+```bash
+docker build -t fastapi-auth-api .
+docker run --rm -p 8000:8000 \
+  -e JWT_SECRET_KEY='replace-with-a-secure-random-secret' \
+  fastapi-auth-api
+```
+
+To persist SQLite data across container restarts:
+
+```bash
+docker volume create fastapi_auth_data
+docker run --rm -p 8000:8000 \
+  -e JWT_SECRET_KEY='replace-with-a-secure-random-secret' \
+  -e DATABASE_URL='sqlite:////app/data/app.db' \
+  -v fastapi_auth_data:/app/data \
+  fastapi-auth-api
+```
+
+### Run With Docker Compose (Optional)
+
+Set `JWT_SECRET_KEY` in your shell or a `.env` file first, then run:
+
+```bash
+docker compose up --build
+```
+
 ## Endpoints
 
 - `GET /status` -> `{ "status": "ok" }`
@@ -34,6 +64,11 @@ uvicorn app.main:app --reload
 - `POST /refresh` with JSON body `{ "refresh_token": "..." }` returns a new access token
 - `GET /user` with bearer token in `Authorization` header
 - `POST /change-password` with JSON body `{ "current_password": "...", "new_password": "..." }` and bearer token
+- `POST /notes` with JSON body `{ "value": "..." }` (max 512 chars) and bearer token
+- `GET /notes` list authenticated user's notes
+- `GET /notes/{note_id}` fetch one of authenticated user's notes
+- `PUT /notes/{note_id}` with JSON body `{ "value": "..." }` to modify note text
+- `DELETE /notes/{note_id}` delete authenticated user's note (`204` on success)
 
 Password validation during registration is implemented through an extensible `validate_password()` function (currently enforcing minimum length 12, designed for adding future checks like breached-password checks).
 
