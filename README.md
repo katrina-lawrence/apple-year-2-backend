@@ -67,12 +67,13 @@ docker compose up --build
 - `POST /notes` with JSON body `{ "value": "..." }` (max 512 chars) and bearer token
 - `GET /notes` list authenticated user's notes
 - `GET /notes/{note_id}` fetch one of authenticated user's notes
-- `PUT /notes/{note_id}` with JSON body `{ "value": "..." }` to modify note text
+- `PUT /notes/{note_id}` with JSON body `{ "value": "..." }` to modify note text (updates `modified_at`)
 - `DELETE /notes/{note_id}` delete authenticated user's note (`204` on success)
-- `POST /notes/{note_id}/followups` create follow-up for an owned note with `{ "appointment_at": "<ISO-8601 UTC>", "description": "...", "completed_at": null | "<ISO-8601 UTC>" }`
+- `POST /notes/{note_id}/followups` create follow-up for an owned note with `{ "appointment_at": "<ISO-8601 UTC>", "description": "..." }` (`is_completed` starts as `false`)
 - `GET /followups` list all follow-ups for authenticated user
 - `GET /notes/{note_id}/followups` list follow-ups for one owned note
-- `PATCH /followups/{followup_id}/completion` with `{ "is_completed": true | false }` to set `completed_at` to now or null
+- `PATCH /followups/{followup_id}/completion` with `{ "is_completed": true | false }` to mark/unmark completion
+- `DELETE /followups/{followup_id}` delete one owned follow-up
 
 Password validation during registration is implemented through an extensible `validate_password()` function (currently enforcing minimum length 12, designed for adding future checks like breached-password checks).
 

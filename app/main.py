@@ -10,7 +10,7 @@ from fastapi import Depends, FastAPI, HTTPException, Response, status
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel, Field
 from pwdlib import PasswordHash
-from sqlalchemy import DateTime, String, Text, create_engine, func
+from sqlalchemy import Boolean, DateTime, String, Text, create_engine, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY") or secrets.token_urlsafe(64)
@@ -43,6 +43,9 @@ class Note(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+    modified_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
 
 
 class Followup(Base):
@@ -53,10 +56,13 @@ class Followup(Base):
     note_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     appointment_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     description: Mapped[str] = mapped_column(Text, nullable=False)
+    is_completed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    modified_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
 
 
 class RegisterRequest(BaseModel):
@@ -109,12 +115,12 @@ class NoteResponse(BaseModel):
     id: str
     value: str
     created_at: datetime
+    modified_at: datetime
 
 
 class CreateFollowupRequest(BaseModel):
     appointment_at: datetime
     description: str = Field(min_length=1, max_length=512)
-    completed_at: datetime | None = None
 
 
 class FollowupResponse(BaseModel):
@@ -123,8 +129,9 @@ class FollowupResponse(BaseModel):
     note_id: str
     appointment_at: datetime
     description: str
+    is_completed: bool
     created_at: datetime
-    completed_at: datetime | None
+    modified_at: datetime
 
 
 class FollowupCompletionRequest(BaseModel):
@@ -319,7 +326,12 @@ def create_note(
     db.add(note)
     db.commit()
     db.refresh(note)
-    return NoteResponse(id=note.id, value=note.value, created_at=note.created_at)
+    return NoteResponse(
+        id=note.id,
+        value=note.value,
+        created_at=note.created_at,
+        modified_at=note.modified_at,
+    )
 
 
 @app.get("/notes", response_model=list[NoteResponse])
@@ -328,7 +340,15 @@ def list_notes(
     db: Session = Depends(get_db),
 ) -> list[NoteResponse]:
     notes = db.query(Note).filter(Note.owner_id == user_id).order_by(Note.created_at.desc()).all()
-    return [NoteResponse(id=n.id, value=n.value, created_at=n.created_at) for n in notes]
+    return [
+        NoteResponse(
+            id=n.id,
+            value=n.value,
+            created_at=n.created_at,
+            modified_at=n.modified_at,
+        )
+        for n in notes
+    ]
 
 
 @app.get("/notes/{note_id}", response_model=NoteResponse)
@@ -340,7 +360,12 @@ def get_note(
     note = db.query(Note).filter(Note.id == note_id, Note.owner_id == user_id).first()
     if note is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Note not found")
-    return NoteResponse(id=note.id, value=note.value, created_at=note.created_at)
+    return NoteResponse(
+        id=note.id,
+        value=note.value,
+        created_at=note.created_at,
+        modified_at=note.modified_at,
+    )
 
 
 @app.put("/notes/{note_id}", response_model=NoteResponse)
@@ -354,10 +379,16 @@ def update_note(
     if note is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Note not found")
     note.value = payload.value
+    note.modified_at = datetime.now(timezone.utc)
     db.add(note)
     db.commit()
     db.refresh(note)
-    return NoteResponse(id=note.id, value=note.value, created_at=note.created_at)
+    return NoteResponse(
+        id=note.id,
+        value=note.value,
+        created_at=note.created_at,
+        modified_at=note.modified_at,
+    )
 
 
 @app.delete("/notes/{note_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -369,6 +400,7 @@ def delete_note(
     note = db.query(Note).filter(Note.id == note_id, Note.owner_id == user_id).first()
     if note is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Note not found")
+    db.query(Followup).filter(Followup.note_id == note_id).delete(synchronize_session=False)
     db.delete(note)
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -391,7 +423,7 @@ def create_followup_for_note(
         note_id=note_id,
         appointment_at=payload.appointment_at,
         description=payload.description,
-        completed_at=payload.completed_at,
+        is_completed=False,
     )
     db.add(followup)
     db.commit()
@@ -402,8 +434,9 @@ def create_followup_for_note(
         note_id=followup.note_id,
         appointment_at=followup.appointment_at,
         description=followup.description,
+        is_completed=followup.is_completed,
         created_at=followup.created_at,
-        completed_at=followup.completed_at,
+        modified_at=followup.modified_at,
     )
 
 
@@ -425,8 +458,9 @@ def list_followups_for_user(
             note_id=f.note_id,
             appointment_at=f.appointment_at,
             description=f.description,
+            is_completed=f.is_completed,
             created_at=f.created_at,
-            completed_at=f.completed_at,
+            modified_at=f.modified_at,
         )
         for f in followups
     ]
@@ -455,8 +489,9 @@ def list_followups_for_note(
             note_id=f.note_id,
             appointment_at=f.appointment_at,
             description=f.description,
+            is_completed=f.is_completed,
             created_at=f.created_at,
-            completed_at=f.completed_at,
+            modified_at=f.modified_at,
         )
         for f in followups
     ]
@@ -473,7 +508,8 @@ def set_followup_completion(
     if followup is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Followup not found")
 
-    followup.completed_at = datetime.now(timezone.utc) if payload.is_completed else None
+    followup.is_completed = payload.is_completed
+    followup.modified_at = datetime.now(timezone.utc)
     db.add(followup)
     db.commit()
     db.refresh(followup)
@@ -483,6 +519,21 @@ def set_followup_completion(
         note_id=followup.note_id,
         appointment_at=followup.appointment_at,
         description=followup.description,
+        is_completed=followup.is_completed,
         created_at=followup.created_at,
-        completed_at=followup.completed_at,
+        modified_at=followup.modified_at,
     )
+
+
+@app.delete("/followups/{followup_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_followup(
+    followup_id: str,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+) -> Response:
+    followup = db.query(Followup).filter(Followup.id == followup_id, Followup.owner_id == user_id).first()
+    if followup is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Followup not found")
+    db.delete(followup)
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

@@ -304,6 +304,44 @@ def test_note_creation_time_is_recorded_in_db() -> None:
         note = db.get(Note, note_id)
         assert note is not None
         assert note.created_at is not None
+        assert note.modified_at is not None
+
+
+def test_note_modified_at_updates_on_edit() -> None:
+    token = _register_and_login("modifiedattest")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    created = client.post("/notes", json={"value": "initial"}, headers=headers)
+    assert created.status_code == 201
+    note_id = created.json()["id"]
+    initial_modified_at = created.json()["modified_at"]
+
+    updated = client.put(f"/notes/{note_id}", json={"value": "updated"}, headers=headers)
+    assert updated.status_code == 200
+    assert updated.json()["modified_at"] != initial_modified_at
+
+
+def test_delete_note_removes_associated_followups() -> None:
+    token = _register_and_login("notecascade")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    note_id = client.post("/notes", json={"value": "note with followup"}, headers=headers).json()["id"]
+    followup_id = client.post(
+        f"/notes/{note_id}/followups",
+        json={"appointment_at": "2030-01-12T09:00:00Z", "description": "linked"},
+        headers=headers,
+    ).json()["id"]
+
+    deleted = client.delete(f"/notes/{note_id}", headers=headers)
+    assert deleted.status_code == 204
+
+    listed = client.get("/followups", headers=headers)
+    assert listed.status_code == 200
+    assert all(f["id"] != followup_id for f in listed.json())
+
+    with SessionLocal() as db:
+        followup = db.get(Followup, followup_id)
+        assert followup is None
 
 
 def test_create_followup_for_owned_note() -> None:
@@ -318,7 +356,6 @@ def test_create_followup_for_owned_note() -> None:
         json={
             "appointment_at": "2030-01-15T10:30:00Z",
             "description": "Six month follow-up cleaning",
-            "completed_at": None,
         },
         headers=headers,
     )
@@ -328,8 +365,9 @@ def test_create_followup_for_owned_note() -> None:
     assert body["note_id"] == note_id
     assert body["description"] == "Six month follow-up cleaning"
     assert body["appointment_at"]
+    assert body["is_completed"] is False
     assert body["created_at"]
-    assert body["completed_at"] is None
+    assert body["modified_at"]
 
 
 def test_create_followup_rejects_unowned_note() -> None:
@@ -454,18 +492,22 @@ def test_followup_creation_time_is_recorded_in_db() -> None:
     with SessionLocal() as db:
         followup = db.get(Followup, followup_id)
         assert followup is not None
+        assert followup.is_completed is False
         assert followup.created_at is not None
+        assert followup.modified_at is not None
 
 
 def test_followup_completion_toggle_complete_then_incomplete() -> None:
     token = _register_and_login("followuptoggle")
     headers = {"Authorization": f"Bearer {token}"}
     note_id = client.post("/notes", json={"value": "toggle note"}, headers=headers).json()["id"]
-    followup_id = client.post(
+    created = client.post(
         f"/notes/{note_id}/followups",
         json={"appointment_at": "2030-01-12T09:00:00Z", "description": "toggle me"},
         headers=headers,
-    ).json()["id"]
+    )
+    followup_id = created.json()["id"]
+    initial_modified_at = created.json()["modified_at"]
 
     complete = client.patch(
         f"/followups/{followup_id}/completion",
@@ -473,7 +515,9 @@ def test_followup_completion_toggle_complete_then_incomplete() -> None:
         headers=headers,
     )
     assert complete.status_code == 200
-    assert complete.json()["completed_at"] is not None
+    assert complete.json()["is_completed"] is True
+    assert complete.json()["modified_at"] != initial_modified_at
+    complete_modified_at = complete.json()["modified_at"]
 
     incomplete = client.patch(
         f"/followups/{followup_id}/completion",
@@ -481,7 +525,8 @@ def test_followup_completion_toggle_complete_then_incomplete() -> None:
         headers=headers,
     )
     assert incomplete.status_code == 200
-    assert incomplete.json()["completed_at"] is None
+    assert incomplete.json()["is_completed"] is False
+    assert incomplete.json()["modified_at"] != complete_modified_at
 
 
 def test_followup_completion_requires_authentication() -> None:
@@ -522,4 +567,52 @@ def test_followup_completion_rejects_unknown_followup() -> None:
         json={"is_completed": True},
         headers=headers,
     )
+    assert response.status_code == 404
+
+
+def test_delete_followup_success() -> None:
+    token = _register_and_login("followupdelete")
+    headers = {"Authorization": f"Bearer {token}"}
+    note_id = client.post("/notes", json={"value": "delete note"}, headers=headers).json()["id"]
+    followup_id = client.post(
+        f"/notes/{note_id}/followups",
+        json={"appointment_at": "2030-01-12T09:00:00Z", "description": "delete me"},
+        headers=headers,
+    ).json()["id"]
+
+    deleted = client.delete(f"/followups/{followup_id}", headers=headers)
+    assert deleted.status_code == 204
+
+    listed = client.get("/followups", headers=headers)
+    assert listed.status_code == 200
+    assert all(f["id"] != followup_id for f in listed.json())
+
+
+def test_delete_followup_requires_authentication() -> None:
+    response = client.delete("/followups/some-followup")
+    assert response.status_code == 401
+
+
+def test_delete_followup_rejects_unowned_followup() -> None:
+    token_a = _register_and_login("followupdeletea")
+    token_b = _register_and_login("followupdeleteb")
+    headers_a = {"Authorization": f"Bearer {token_a}"}
+    headers_b = {"Authorization": f"Bearer {token_b}"}
+
+    note_id = client.post("/notes", json={"value": "private"}, headers=headers_a).json()["id"]
+    followup_id = client.post(
+        f"/notes/{note_id}/followups",
+        json={"appointment_at": "2030-01-12T09:00:00Z", "description": "private followup"},
+        headers=headers_a,
+    ).json()["id"]
+
+    response = client.delete(f"/followups/{followup_id}", headers=headers_b)
+    assert response.status_code == 404
+
+
+def test_delete_followup_rejects_unknown_followup() -> None:
+    token = _register_and_login("followupdeletemissing")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    response = client.delete("/followups/not-a-real-id", headers=headers)
     assert response.status_code == 404
