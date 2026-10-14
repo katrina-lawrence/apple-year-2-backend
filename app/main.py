@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import secrets
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
@@ -12,6 +13,9 @@ from pydantic import BaseModel, Field, model_validator
 from pwdlib import PasswordHash
 from sqlalchemy import JSON, Boolean, DateTime, Float, String, Text, create_engine, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
+
+from app.db.bootstrap import init_db, maybe_seed_sample_data
+from app.db.sample_data import seed_sample_data
 
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY") or secrets.token_urlsafe(64)
 JWT_ALGORITHM = "HS256"
@@ -170,9 +174,23 @@ class FollowupCompletionRequest(BaseModel):
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
 engine = create_engine(DATABASE_URL, connect_args=connect_args)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="FastAPI Auth API")
+
+def startup_initialize_database() -> None:
+    init_db(Base, engine)
+    maybe_seed_sample_data(
+        SessionLocal,
+        lambda db: seed_sample_data(db, User, Note, Followup, hash_password),
+    )
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    startup_initialize_database()
+    yield
+
+
+app = FastAPI(title="FastAPI Auth API", lifespan=lifespan)
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/login")
 
 

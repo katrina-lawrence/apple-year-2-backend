@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pytest
+
 TEST_DB_PATH = Path("/workspace/test_app.db")
 if TEST_DB_PATH.exists():
     TEST_DB_PATH.unlink()
@@ -18,20 +20,101 @@ from app.main import (  # noqa: E402
     User,
     app,
     engine,
+    hash_password,
     validate_password,
     verify_password,
 )
+from app.db.bootstrap import maybe_seed_sample_data  # noqa: E402
+from app.db.sample_data import (  # noqa: E402
+    SEED_FOLLOWUP_ID_1,
+    SEED_FOLLOWUP_ID_2,
+    SEED_NOTE_ID_1,
+    SEED_NOTE_ID_2,
+    SEED_USERNAME,
+    seed_sample_data,
+)
 
 
-client = TestClient(app)
+client: TestClient
 Base.metadata.drop_all(bind=engine)
 Base.metadata.create_all(bind=engine)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _client_lifespan() -> None:
+    global client
+    with TestClient(app) as test_client:
+        client = test_client
+        yield
+
+
+def _reset_db() -> None:
+    Base.metadata.drop_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
 
 
 def test_status_endpoint() -> None:
     response = client.get("/status")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+def test_sample_seed_disabled_by_default(monkeypatch) -> None:
+    _reset_db()
+    monkeypatch.delenv("SEED_SAMPLE_DATA", raising=False)
+
+    inserted = maybe_seed_sample_data(
+        SessionLocal,
+        lambda db: seed_sample_data(db, User, Note, Followup, hash_password),
+    )
+    assert inserted is False
+
+    with SessionLocal() as db:
+        demo_user = db.query(User).filter(User.username == SEED_USERNAME).first()
+        assert demo_user is None
+
+
+def test_sample_seed_enabled_inserts_demo_rows(monkeypatch) -> None:
+    _reset_db()
+    monkeypatch.setenv("SEED_SAMPLE_DATA", "true")
+
+    inserted = maybe_seed_sample_data(
+        SessionLocal,
+        lambda db: seed_sample_data(db, User, Note, Followup, hash_password),
+    )
+    assert inserted is True
+
+    with SessionLocal() as db:
+        demo_user = db.query(User).filter(User.username == SEED_USERNAME).first()
+        assert demo_user is not None
+        assert db.get(Note, SEED_NOTE_ID_1) is not None
+        assert db.get(Note, SEED_NOTE_ID_2) is not None
+        assert db.get(Followup, SEED_FOLLOWUP_ID_1) is not None
+        assert db.get(Followup, SEED_FOLLOWUP_ID_2) is not None
+
+
+def test_sample_seed_is_idempotent(monkeypatch) -> None:
+    _reset_db()
+    monkeypatch.setenv("SEED_SAMPLE_DATA", "true")
+
+    maybe_seed_sample_data(
+        SessionLocal,
+        lambda db: seed_sample_data(db, User, Note, Followup, hash_password),
+    )
+    maybe_seed_sample_data(
+        SessionLocal,
+        lambda db: seed_sample_data(db, User, Note, Followup, hash_password),
+    )
+
+    with SessionLocal() as db:
+        assert db.query(User).filter(User.username == SEED_USERNAME).count() == 1
+        assert db.query(Note).filter(Note.id.in_([SEED_NOTE_ID_1, SEED_NOTE_ID_2])).count() == 2
+        assert (
+            db.query(Followup)
+            .filter(Followup.id.in_([SEED_FOLLOWUP_ID_1, SEED_FOLLOWUP_ID_2]))
+            .count()
+            == 2
+        )
 
 
 def test_register_login_and_user_flow() -> None:

@@ -26,6 +26,12 @@ pip install -e '.[dev]'
 uvicorn app.main:app --reload
 ```
 
+To load sample seed data in local/dev startup:
+
+```bash
+SEED_SAMPLE_DATA=true uvicorn app.main:app --reload
+```
+
 ## Run With Docker
 
 Docker Compose is optional. Plain Docker works directly.
@@ -121,3 +127,4 @@ curl -s http://127.0.0.1:8000/user \
 - `JWT_EXPIRE_MINUTES` (default: `60`)
 - `JWT_REFRESH_EXPIRE_DAYS` (default: `30`)
 - `DATABASE_URL` (default: `sqlite:///./app.db`)
+- `SEED_SAMPLE_DATA` (default: `false`; set to `true` in local/dev to insert sample rows at startup)
