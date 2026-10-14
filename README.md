@@ -64,15 +64,17 @@ docker compose up --build
 - `POST /refresh` with JSON body `{ "refresh_token": "..." }` returns a new access token
 - `GET /user` with bearer token in `Authorization` header
 - `POST /change-password` with JSON body `{ "current_password": "...", "new_password": "..." }` and bearer token
-- `POST /notes` with JSON body `{ "value": "..." }` (max 512 chars) and bearer token
+- `POST /notes` with JSON body
+  `{ "value": "...", "summary": "...?", "balanceDueAmount": 10.5?, "balanceDueCurrency": "USD"?, "categories": ["..."]?, "appointmentTiming": "...?" }`
+  and bearer token
 - `GET /notes` list authenticated user's notes
 - `GET /notes/{note_id}` fetch one of authenticated user's notes
-- `PUT /notes/{note_id}` with JSON body `{ "value": "..." }` to modify note text (updates `modified_at`)
+- `PUT /notes/{note_id}` with JSON body containing one or more writable note fields to patch that note (updates `editedAtUTC`)
 - `DELETE /notes/{note_id}` delete authenticated user's note (`204` on success)
-- `POST /notes/{note_id}/followups` create follow-up for an owned note with `{ "appointment_at": "<ISO-8601 UTC>", "description": "..." }` (`is_completed` starts as `false`)
+- `POST /notes/{note_id}/followups` create follow-up for an owned note with `{ "descriptionText": "...", "type": "..." }` (`completed` starts as `false`)
 - `GET /followups` list all follow-ups for authenticated user
 - `GET /notes/{note_id}/followups` list follow-ups for one owned note
-- `PATCH /followups/{followup_id}/completion` with `{ "is_completed": true | false }` to mark/unmark completion
+- `PATCH /followups/{followup_id}/completion` with `{ "completed": true | false }` to mark/unmark completion
 - `DELETE /followups/{followup_id}` delete one owned follow-up
 
 Password validation during registration is implemented through an extensible `validate_password()` function (currently enforcing minimum length 12, designed for adding future checks like breached-password checks).

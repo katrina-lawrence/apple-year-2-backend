@@ -225,26 +225,52 @@ def test_notes_crud_flow_for_owner() -> None:
     token = _register_and_login("notesowner")
     headers = {"Authorization": f"Bearer {token}"}
 
-    create = client.post("/notes", json={"value": "first note"}, headers=headers)
+    create = client.post(
+        "/notes",
+        json={
+            "value": "first note",
+            "summary": "brief",
+            "balanceDueAmount": 120.5,
+            "balanceDueCurrency": "USD",
+            "categories": ["billing", "priority"],
+            "appointmentTiming": "next week",
+        },
+        headers=headers,
+    )
     assert create.status_code == 201
     created = create.json()
     note_id = created["id"]
     assert created["value"] == "first note"
-    assert created["created_at"]
+    assert created["summary"] == "brief"
+    assert created["balanceDueAmount"] == 120.5
+    assert created["balanceDueCurrency"] == "USD"
+    assert created["categories"] == ["billing", "priority"]
+    assert created["appointmentTiming"] == "next week"
+    assert created["createdAtUTC"]
+    assert created["editedAtUTC"]
 
     fetched = client.get(f"/notes/{note_id}", headers=headers)
     assert fetched.status_code == 200
     assert fetched.json()["id"] == note_id
     assert fetched.json()["value"] == "first note"
+    assert fetched.json()["summary"] == "brief"
 
     listed = client.get("/notes", headers=headers)
     assert listed.status_code == 200
     assert any(note["id"] == note_id for note in listed.json())
 
-    updated = client.put(f"/notes/{note_id}", json={"value": "updated note"}, headers=headers)
+    updated = client.put(
+        f"/notes/{note_id}",
+        json={"value": "updated note", "summary": None, "categories": ["updated"]},
+        headers=headers,
+    )
     assert updated.status_code == 200
     assert updated.json()["id"] == note_id
     assert updated.json()["value"] == "updated note"
+    assert updated.json()["summary"] is None
+    assert updated.json()["categories"] == ["updated"]
+    assert updated.json()["balanceDueAmount"] == 120.5
+    assert updated.json()["balanceDueCurrency"] == "USD"
 
     deleted = client.delete(f"/notes/{note_id}", headers=headers)
     assert deleted.status_code == 204
@@ -303,8 +329,8 @@ def test_note_creation_time_is_recorded_in_db() -> None:
     with SessionLocal() as db:
         note = db.get(Note, note_id)
         assert note is not None
-        assert note.created_at is not None
-        assert note.modified_at is not None
+        assert note.created_at_utc is not None
+        assert note.edited_at_utc is not None
 
 
 def test_note_modified_at_updates_on_edit() -> None:
@@ -314,11 +340,20 @@ def test_note_modified_at_updates_on_edit() -> None:
     created = client.post("/notes", json={"value": "initial"}, headers=headers)
     assert created.status_code == 201
     note_id = created.json()["id"]
-    initial_modified_at = created.json()["modified_at"]
+    initial_modified_at = created.json()["editedAtUTC"]
 
     updated = client.put(f"/notes/{note_id}", json={"value": "updated"}, headers=headers)
     assert updated.status_code == 200
-    assert updated.json()["modified_at"] != initial_modified_at
+    assert updated.json()["editedAtUTC"] != initial_modified_at
+
+
+def test_note_update_requires_at_least_one_field() -> None:
+    token = _register_and_login("noteupdateempty")
+    headers = {"Authorization": f"Bearer {token}"}
+    note_id = client.post("/notes", json={"value": "initial"}, headers=headers).json()["id"]
+
+    response = client.put(f"/notes/{note_id}", json={}, headers=headers)
+    assert response.status_code == 422
 
 
 def test_delete_note_removes_associated_followups() -> None:
@@ -328,7 +363,7 @@ def test_delete_note_removes_associated_followups() -> None:
     note_id = client.post("/notes", json={"value": "note with followup"}, headers=headers).json()["id"]
     followup_id = client.post(
         f"/notes/{note_id}/followups",
-        json={"appointment_at": "2030-01-12T09:00:00Z", "description": "linked"},
+        json={"descriptionText": "linked", "type": "reminder"},
         headers=headers,
     ).json()["id"]
 
@@ -354,20 +389,20 @@ def test_create_followup_for_owned_note() -> None:
     created = client.post(
         f"/notes/{note_id}/followups",
         json={
-            "appointment_at": "2030-01-15T10:30:00Z",
-            "description": "Six month follow-up cleaning",
+            "descriptionText": "Six month follow-up cleaning",
+            "type": "checkup",
         },
         headers=headers,
     )
     assert created.status_code == 201
     body = created.json()
     assert body["id"]
-    assert body["note_id"] == note_id
-    assert body["description"] == "Six month follow-up cleaning"
-    assert body["appointment_at"]
-    assert body["is_completed"] is False
-    assert body["created_at"]
-    assert body["modified_at"]
+    assert body["noteID"] == note_id
+    assert body["descriptionText"] == "Six month follow-up cleaning"
+    assert body["type"] == "checkup"
+    assert body["completed"] is False
+    assert body["createdAtUTC"]
+    assert body["editedAtUTC"]
 
 
 def test_create_followup_rejects_unowned_note() -> None:
@@ -382,8 +417,8 @@ def test_create_followup_rejects_unowned_note() -> None:
     response = client.post(
         f"/notes/{note_id}/followups",
         json={
-            "appointment_at": "2030-01-15T10:30:00Z",
-            "description": "Unauthorized attempt",
+            "descriptionText": "Unauthorized attempt",
+            "type": "checkup",
         },
         headers=headers_b,
     )
@@ -401,19 +436,19 @@ def test_list_followups_for_user_returns_only_owned_followups() -> None:
 
     client.post(
         f"/notes/{note_a}/followups",
-        json={"appointment_at": "2030-01-10T10:00:00Z", "description": "a1"},
+        json={"descriptionText": "a1", "type": "task"},
         headers=headers_a,
     )
     client.post(
         f"/notes/{note_b}/followups",
-        json={"appointment_at": "2030-01-11T10:00:00Z", "description": "b1"},
+        json={"descriptionText": "b1", "type": "task"},
         headers=headers_b,
     )
 
     followups_a = client.get("/followups", headers=headers_a)
     assert followups_a.status_code == 200
     assert len(followups_a.json()) == 1
-    assert followups_a.json()[0]["description"] == "a1"
+    assert followups_a.json()[0]["descriptionText"] == "a1"
 
 
 def test_list_followups_for_specific_note() -> None:
@@ -425,23 +460,23 @@ def test_list_followups_for_specific_note() -> None:
 
     client.post(
         f"/notes/{note1}/followups",
-        json={"appointment_at": "2030-01-12T09:00:00Z", "description": "n1-f1"},
+        json={"descriptionText": "n1-f1", "type": "task"},
         headers=headers,
     )
     client.post(
         f"/notes/{note1}/followups",
-        json={"appointment_at": "2030-01-13T09:00:00Z", "description": "n1-f2"},
+        json={"descriptionText": "n1-f2", "type": "task"},
         headers=headers,
     )
     client.post(
         f"/notes/{note2}/followups",
-        json={"appointment_at": "2030-01-14T09:00:00Z", "description": "n2-f1"},
+        json={"descriptionText": "n2-f1", "type": "task"},
         headers=headers,
     )
 
     listed = client.get(f"/notes/{note1}/followups", headers=headers)
     assert listed.status_code == 200
-    descriptions = [f["description"] for f in listed.json()]
+    descriptions = [f["descriptionText"] for f in listed.json()]
     assert descriptions == ["n1-f1", "n1-f2"]
 
 
@@ -450,7 +485,7 @@ def test_followup_endpoints_require_authentication() -> None:
     assert (
         client.post(
             "/notes/some-note/followups",
-            json={"appointment_at": "2030-01-12T09:00:00Z", "description": "x"},
+            json={"descriptionText": "x", "type": "task"},
         ).status_code
         == 401
     )
@@ -462,16 +497,16 @@ def test_followup_validation_for_bad_payloads() -> None:
     headers = {"Authorization": f"Bearer {token}"}
     note_id = client.post("/notes", json={"value": "note"}, headers=headers).json()["id"]
 
-    bad_datetime = client.post(
+    empty_type = client.post(
         f"/notes/{note_id}/followups",
-        json={"appointment_at": "not-a-datetime", "description": "bad"},
+        json={"descriptionText": "bad", "type": ""},
         headers=headers,
     )
-    assert bad_datetime.status_code == 422
+    assert empty_type.status_code == 422
 
     too_long_description = client.post(
         f"/notes/{note_id}/followups",
-        json={"appointment_at": "2030-01-12T09:00:00Z", "description": "a" * 513},
+        json={"descriptionText": "a" * 513, "type": "task"},
         headers=headers,
     )
     assert too_long_description.status_code == 422
@@ -484,7 +519,7 @@ def test_followup_creation_time_is_recorded_in_db() -> None:
 
     created = client.post(
         f"/notes/{note_id}/followups",
-        json={"appointment_at": "2030-01-12T09:00:00Z", "description": "db check"},
+        json={"descriptionText": "db check", "type": "task"},
         headers=headers,
     )
     followup_id = created.json()["id"]
@@ -492,9 +527,9 @@ def test_followup_creation_time_is_recorded_in_db() -> None:
     with SessionLocal() as db:
         followup = db.get(Followup, followup_id)
         assert followup is not None
-        assert followup.is_completed is False
-        assert followup.created_at is not None
-        assert followup.modified_at is not None
+        assert followup.completed is False
+        assert followup.created_at_utc is not None
+        assert followup.edited_at_utc is not None
 
 
 def test_followup_completion_toggle_complete_then_incomplete() -> None:
@@ -503,36 +538,36 @@ def test_followup_completion_toggle_complete_then_incomplete() -> None:
     note_id = client.post("/notes", json={"value": "toggle note"}, headers=headers).json()["id"]
     created = client.post(
         f"/notes/{note_id}/followups",
-        json={"appointment_at": "2030-01-12T09:00:00Z", "description": "toggle me"},
+        json={"descriptionText": "toggle me", "type": "task"},
         headers=headers,
     )
     followup_id = created.json()["id"]
-    initial_modified_at = created.json()["modified_at"]
+    initial_modified_at = created.json()["editedAtUTC"]
 
     complete = client.patch(
         f"/followups/{followup_id}/completion",
-        json={"is_completed": True},
+        json={"completed": True},
         headers=headers,
     )
     assert complete.status_code == 200
-    assert complete.json()["is_completed"] is True
-    assert complete.json()["modified_at"] != initial_modified_at
-    complete_modified_at = complete.json()["modified_at"]
+    assert complete.json()["completed"] is True
+    assert complete.json()["editedAtUTC"] != initial_modified_at
+    complete_modified_at = complete.json()["editedAtUTC"]
 
     incomplete = client.patch(
         f"/followups/{followup_id}/completion",
-        json={"is_completed": False},
+        json={"completed": False},
         headers=headers,
     )
     assert incomplete.status_code == 200
-    assert incomplete.json()["is_completed"] is False
-    assert incomplete.json()["modified_at"] != complete_modified_at
+    assert incomplete.json()["completed"] is False
+    assert incomplete.json()["editedAtUTC"] != complete_modified_at
 
 
 def test_followup_completion_requires_authentication() -> None:
     response = client.patch(
         "/followups/some-followup/completion",
-        json={"is_completed": True},
+        json={"completed": True},
     )
     assert response.status_code == 401
 
@@ -546,13 +581,13 @@ def test_followup_completion_rejects_unowned_followup() -> None:
     note_id = client.post("/notes", json={"value": "private"}, headers=headers_a).json()["id"]
     followup_id = client.post(
         f"/notes/{note_id}/followups",
-        json={"appointment_at": "2030-01-12T09:00:00Z", "description": "private followup"},
+        json={"descriptionText": "private followup", "type": "task"},
         headers=headers_a,
     ).json()["id"]
 
     response = client.patch(
         f"/followups/{followup_id}/completion",
-        json={"is_completed": True},
+        json={"completed": True},
         headers=headers_b,
     )
     assert response.status_code == 404
@@ -564,7 +599,7 @@ def test_followup_completion_rejects_unknown_followup() -> None:
 
     response = client.patch(
         "/followups/not-a-real-id/completion",
-        json={"is_completed": True},
+        json={"completed": True},
         headers=headers,
     )
     assert response.status_code == 404
@@ -576,7 +611,7 @@ def test_delete_followup_success() -> None:
     note_id = client.post("/notes", json={"value": "delete note"}, headers=headers).json()["id"]
     followup_id = client.post(
         f"/notes/{note_id}/followups",
-        json={"appointment_at": "2030-01-12T09:00:00Z", "description": "delete me"},
+        json={"descriptionText": "delete me", "type": "task"},
         headers=headers,
     ).json()["id"]
 
@@ -602,7 +637,7 @@ def test_delete_followup_rejects_unowned_followup() -> None:
     note_id = client.post("/notes", json={"value": "private"}, headers=headers_a).json()["id"]
     followup_id = client.post(
         f"/notes/{note_id}/followups",
-        json={"appointment_at": "2030-01-12T09:00:00Z", "description": "private followup"},
+        json={"descriptionText": "private followup", "type": "task"},
         headers=headers_a,
     ).json()["id"]
 
