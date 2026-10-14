@@ -83,6 +83,7 @@ docker compose up --build
 ### Authenticated Endpoints (Require `Authorization: Bearer <access_token>`)
 
 - `GET /user`
+- `GET /sync/user` returns `{ "notes": [...], "followups": [...], "serverTimeUTC": "..." }` for authenticated user
 - `POST /change-password` with JSON body `{ "current_password": "...", "new_password": "..." }`
 - `POST /notes` with JSON body
   `{ "value": "...", "summary": "...?", "balanceDueAmount": 10.5?, "balanceDueCurrency": "USD"?, "categories": ["..."]?, "appointmentTiming": "...?" }`

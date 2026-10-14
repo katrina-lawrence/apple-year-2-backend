@@ -112,6 +112,12 @@ class UserResponse(BaseModel):
     user_id: str
 
 
+class UserSyncResponse(BaseModel):
+    notes: list["NoteResponse"]
+    followups: list["FollowupResponse"]
+    serverTimeUTC: datetime
+
+
 class StatusResponse(BaseModel):
     status: str
 
@@ -333,6 +339,25 @@ def get_current_user_id(token: str = Depends(oauth2_scheme), db: Session = Depen
 @app.get("/user", response_model=UserResponse)
 def get_user(user_id: str = Depends(get_current_user_id)) -> UserResponse:
     return UserResponse(user_id=user_id)
+
+
+@app.get("/sync/user", response_model=UserSyncResponse)
+def sync_user_data(
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+) -> UserSyncResponse:
+    notes = db.query(Note).filter(Note.owner_id == user_id).order_by(Note.created_at_utc.desc()).all()
+    followups = (
+        db.query(Followup)
+        .filter(Followup.owner_id == user_id)
+        .order_by(Followup.created_at_utc.asc())
+        .all()
+    )
+    return UserSyncResponse(
+        notes=[build_note_response(note) for note in notes],
+        followups=[build_followup_response(followup) for followup in followups],
+        serverTimeUTC=datetime.now(timezone.utc),
+    )
 
 
 @app.post("/change-password", response_model=StatusResponse)

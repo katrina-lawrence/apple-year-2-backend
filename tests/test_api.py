@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from datetime import datetime
 
 import pytest
 
@@ -302,6 +303,86 @@ def _register_and_login(username: str, password: str = "initialpass123") -> str:
     login = client.post("/login", json={"username": username, "password": password})
     assert login.status_code == 200
     return login.json()["access_token"]
+
+
+def test_sync_user_returns_notes_followups_and_server_time() -> None:
+    token = _register_and_login("syncowner")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    note_1 = client.post("/notes", json={"value": "sync note 1"}, headers=headers)
+    note_2 = client.post("/notes", json={"value": "sync note 2"}, headers=headers)
+    assert note_1.status_code == 201
+    assert note_2.status_code == 201
+
+    note_1_id = note_1.json()["id"]
+    note_2_id = note_2.json()["id"]
+
+    followup_1 = client.post(
+        f"/notes/{note_1_id}/followups",
+        json={"descriptionText": "sync followup 1", "type": "task"},
+        headers=headers,
+    )
+    followup_2 = client.post(
+        f"/notes/{note_2_id}/followups",
+        json={"descriptionText": "sync followup 2", "type": "task"},
+        headers=headers,
+    )
+    assert followup_1.status_code == 201
+    assert followup_2.status_code == 201
+
+    response = client.get("/sync/user", headers=headers)
+    assert response.status_code == 200
+    body = response.json()
+
+    assert set(body.keys()) == {"notes", "followups", "serverTimeUTC"}
+    parsed_server_time = datetime.fromisoformat(body["serverTimeUTC"].replace("Z", "+00:00"))
+    assert parsed_server_time.tzinfo is not None
+
+    notes_response = client.get("/notes", headers=headers)
+    followups_response = client.get("/followups", headers=headers)
+    assert notes_response.status_code == 200
+    assert followups_response.status_code == 200
+    assert body["notes"] == notes_response.json()
+    assert body["followups"] == followups_response.json()
+
+
+def test_sync_user_requires_authentication() -> None:
+    response = client.get("/sync/user")
+    assert response.status_code == 401
+
+
+def test_sync_user_enforces_owner_isolation() -> None:
+    token_a = _register_and_login("syncisolationa")
+    token_b = _register_and_login("syncisolationb")
+    headers_a = {"Authorization": f"Bearer {token_a}"}
+    headers_b = {"Authorization": f"Bearer {token_b}"}
+
+    note_a = client.post("/notes", json={"value": "owner a note"}, headers=headers_a)
+    note_b = client.post("/notes", json={"value": "owner b note"}, headers=headers_b)
+    assert note_a.status_code == 201
+    assert note_b.status_code == 201
+    note_a_id = note_a.json()["id"]
+    note_b_id = note_b.json()["id"]
+
+    followup_a = client.post(
+        f"/notes/{note_a_id}/followups",
+        json={"descriptionText": "owner a followup", "type": "task"},
+        headers=headers_a,
+    )
+    followup_b = client.post(
+        f"/notes/{note_b_id}/followups",
+        json={"descriptionText": "owner b followup", "type": "task"},
+        headers=headers_b,
+    )
+    assert followup_a.status_code == 201
+    assert followup_b.status_code == 201
+
+    sync_a = client.get("/sync/user", headers=headers_a)
+    assert sync_a.status_code == 200
+    body_a = sync_a.json()
+
+    assert {note["id"] for note in body_a["notes"]} == {note_a_id}
+    assert {followup["id"] for followup in body_a["followups"]} == {followup_a.json()["id"]}
 
 
 def test_notes_crud_flow_for_owner() -> None:
