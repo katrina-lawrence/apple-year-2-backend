@@ -177,6 +177,21 @@ class FollowupCompletionRequest(BaseModel):
     completed: bool
 
 
+class SyncNoteRequest(BaseModel):
+    value: str | None = Field(default=None, min_length=1, max_length=512)
+    summary: str | None = None
+    balanceDueAmount: float | None = None
+    balanceDueCurrency: str | None = None
+    categories: list[str] | None = None
+    appointmentTiming: str | None = None
+    followups: list[CreateFollowupRequest]
+
+
+class SyncNoteResponse(BaseModel):
+    note: NoteResponse
+    followups: list[FollowupResponse]
+
+
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
 engine = create_engine(DATABASE_URL, connect_args=connect_args)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -486,6 +501,62 @@ def update_note(
     db.commit()
     db.refresh(note)
     return build_note_response(note)
+
+
+@app.post("/sync/note/{note_id}", response_model=SyncNoteResponse)
+def sync_note(
+    note_id: str,
+    payload: SyncNoteRequest,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+) -> SyncNoteResponse:
+    note = db.query(Note).filter(Note.id == note_id, Note.owner_id == user_id).first()
+    if note is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Note not found")
+
+    changed_fields = payload.model_dump(exclude={"followups"}, exclude_unset=True)
+    if "value" in changed_fields:
+        note.value = payload.value  # type: ignore[assignment]
+    if "summary" in changed_fields:
+        note.summary = payload.summary
+    if "balanceDueAmount" in changed_fields:
+        note.balance_due_amount = payload.balanceDueAmount
+    if "balanceDueCurrency" in changed_fields:
+        note.balance_due_currency = payload.balanceDueCurrency
+    if "categories" in changed_fields:
+        note.categories = payload.categories
+    if "appointmentTiming" in changed_fields:
+        note.appointment_timing = payload.appointmentTiming
+    if changed_fields:
+        note.edited_at_utc = datetime.now(timezone.utc)
+
+    db.query(Followup).filter(Followup.owner_id == user_id, Followup.note_id == note_id).delete(
+        synchronize_session=False
+    )
+
+    inserted_followups: list[Followup] = []
+    for item in payload.followups:
+        followup = Followup(
+            id=str(uuid4()),
+            owner_id=user_id,
+            note_id=note_id,
+            description_text=item.descriptionText,
+            type=item.type,
+            completed=False,
+        )
+        db.add(followup)
+        inserted_followups.append(followup)
+
+    db.add(note)
+    db.commit()
+    db.refresh(note)
+    for followup in inserted_followups:
+        db.refresh(followup)
+
+    return SyncNoteResponse(
+        note=build_note_response(note),
+        followups=[build_followup_response(followup) for followup in inserted_followups],
+    )
 
 
 @app.delete("/notes/{note_id}", status_code=status.HTTP_204_NO_CONTENT)

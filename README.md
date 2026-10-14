@@ -84,6 +84,7 @@ docker compose up --build
 
 - `GET /user`
 - `GET /sync/user` returns `{ "notes": [...], "followups": [...], "serverTimeUTC": "..." }` for authenticated user
+- `POST /sync/note/{note_id}` updates an owned note and fully replaces that note's follow-ups using `{ ...noteFieldsToPatch, "followups": [{ "descriptionText": "...", "type": "..." }, ...] }` (`"followups": []` deletes all follow-ups for the note)
 - `POST /change-password` with JSON body `{ "current_password": "...", "new_password": "..." }`
 - `POST /notes` with JSON body
   `{ "value": "...", "summary": "...?", "balanceDueAmount": 10.5?, "balanceDueCurrency": "USD"?, "categories": ["..."]?, "appointmentTiming": "...?" }`

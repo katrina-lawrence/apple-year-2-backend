@@ -385,6 +385,96 @@ def test_sync_user_enforces_owner_isolation() -> None:
     assert {followup["id"] for followup in body_a["followups"]} == {followup_a.json()["id"]}
 
 
+def test_sync_note_updates_note_and_overwrites_followups() -> None:
+    token = _register_and_login("syncnoteowner")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    note_id = client.post("/notes", json={"value": "original"}, headers=headers).json()["id"]
+    old_1 = client.post(
+        f"/notes/{note_id}/followups",
+        json={"descriptionText": "old 1", "type": "task"},
+        headers=headers,
+    ).json()["id"]
+    old_2 = client.post(
+        f"/notes/{note_id}/followups",
+        json={"descriptionText": "old 2", "type": "task"},
+        headers=headers,
+    ).json()["id"]
+
+    response = client.post(
+        f"/sync/note/{note_id}",
+        json={
+            "value": "synced note",
+            "summary": "new summary",
+            "followups": [
+                {"descriptionText": "new 1", "type": "task"},
+                {"descriptionText": "new 2", "type": "checkup"},
+            ],
+        },
+        headers=headers,
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["note"]["id"] == note_id
+    assert body["note"]["value"] == "synced note"
+    assert body["note"]["summary"] == "new summary"
+    assert [f["descriptionText"] for f in body["followups"]] == ["new 1", "new 2"]
+
+    note = client.get(f"/notes/{note_id}", headers=headers)
+    assert note.status_code == 200
+    assert note.json()["value"] == "synced note"
+    assert note.json()["summary"] == "new summary"
+
+    followups = client.get(f"/notes/{note_id}/followups", headers=headers)
+    assert followups.status_code == 200
+    assert [f["descriptionText"] for f in followups.json()] == ["new 1", "new 2"]
+    assert {f["id"] for f in followups.json()}.isdisjoint({old_1, old_2})
+
+
+def test_sync_note_empty_followups_deletes_all_for_note() -> None:
+    token = _register_and_login("syncnoteempty")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    note_id = client.post("/notes", json={"value": "has followups"}, headers=headers).json()["id"]
+    client.post(
+        f"/notes/{note_id}/followups",
+        json={"descriptionText": "to remove", "type": "task"},
+        headers=headers,
+    )
+
+    response = client.post(
+        f"/sync/note/{note_id}",
+        json={"followups": []},
+        headers=headers,
+    )
+    assert response.status_code == 200
+    assert response.json()["followups"] == []
+
+    followups = client.get(f"/notes/{note_id}/followups", headers=headers)
+    assert followups.status_code == 200
+    assert followups.json() == []
+
+
+def test_sync_note_requires_authentication() -> None:
+    response = client.post("/sync/note/some-note-id", json={"followups": []})
+    assert response.status_code == 401
+
+
+def test_sync_note_rejects_unowned_note() -> None:
+    token_a = _register_and_login("syncnoteforbiddena")
+    token_b = _register_and_login("syncnoteforbiddenb")
+    headers_a = {"Authorization": f"Bearer {token_a}"}
+    headers_b = {"Authorization": f"Bearer {token_b}"}
+
+    note_id = client.post("/notes", json={"value": "private"}, headers=headers_a).json()["id"]
+    response = client.post(
+        f"/sync/note/{note_id}",
+        json={"followups": []},
+        headers=headers_b,
+    )
+    assert response.status_code == 404
+
+
 def test_notes_crud_flow_for_owner() -> None:
     token = _register_and_login("notesowner")
     headers = {"Authorization": f"Bearer {token}"}
