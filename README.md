@@ -58,15 +58,19 @@ docker compose up --build
 
 ## Endpoints
 
+### Unauthenticated Endpoints
+
 - `GET /status` -> `{ "status": "ok" }`
 - `POST /register` with JSON body `{ "username": "your-username", "password": "your-password" }`
 - `POST /login` with JSON body `{ "username": "your-username", "password": "your-password" }` returns access and refresh tokens
 - `POST /refresh` with JSON body `{ "refresh_token": "..." }` returns a new access token
-- `GET /user` with bearer token in `Authorization` header
-- `POST /change-password` with JSON body `{ "current_password": "...", "new_password": "..." }` and bearer token
+
+### Authenticated Endpoints (Require `Authorization: Bearer <access_token>`)
+
+- `GET /user`
+- `POST /change-password` with JSON body `{ "current_password": "...", "new_password": "..." }`
 - `POST /notes` with JSON body
   `{ "value": "...", "summary": "...?", "balanceDueAmount": 10.5?, "balanceDueCurrency": "USD"?, "categories": ["..."]?, "appointmentTiming": "...?" }`
-  and bearer token
 - `GET /notes` list authenticated user's notes
 - `GET /notes/{note_id}` fetch one of authenticated user's notes
 - `PUT /notes/{note_id}` with JSON body containing one or more writable note fields to patch that note (updates `editedAtUTC`)
