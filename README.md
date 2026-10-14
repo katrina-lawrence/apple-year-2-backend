@@ -30,10 +30,16 @@ uvicorn app.main:app --reload
 
 Docker Compose is optional. Plain Docker works directly.
 
+You can also configure Docker runs from a local `.env` file:
+
+```bash
+cp .env.example .env
+```
+
 ```bash
 docker build -t fastapi-auth-api .
 docker run --rm -p 8000:8000 \
-  -e JWT_SECRET_KEY='replace-with-a-secure-random-secret' \
+  --env-file .env \
   fastapi-auth-api
 ```
 
@@ -42,15 +48,18 @@ To persist SQLite data across container restarts:
 ```bash
 docker volume create fastapi_auth_data
 docker run --rm -p 8000:8000 \
-  -e JWT_SECRET_KEY='replace-with-a-secure-random-secret' \
-  -e DATABASE_URL='sqlite:////app/data/app.db' \
+  --env-file .env \
   -v fastapi_auth_data:/app/data \
   fastapi-auth-api
 ```
 
 ### Run With Docker Compose (Optional)
 
-Set `JWT_SECRET_KEY` in your shell or a `.env` file first, then run:
+Create a `.env` from the example, then run Compose:
+
+```bash
+cp .env.example .env
+```
 
 ```bash
 docker compose up --build

@@ -7,7 +7,7 @@ services:
       JWT_SECRET_KEY: ${JWT_SECRET_KEY}
       JWT_EXPIRE_MINUTES: ${JWT_EXPIRE_MINUTES:-60}
       JWT_REFRESH_EXPIRE_DAYS: ${JWT_REFRESH_EXPIRE_DAYS:-30}
-      DATABASE_URL: sqlite:////app/data/app.db
+      DATABASE_URL: ${DATABASE_URL:-sqlite:////app/data/app.db}
     volumes:
       - fastapi_auth_data:/app/data
     restart: unless-stopped
