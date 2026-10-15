@@ -890,10 +890,114 @@ def test_followup_completion_toggle_complete_then_incomplete() -> None:
     assert incomplete.json()["editedAtUTC"] != complete_modified_at
 
 
+def test_update_followup_description_and_type_success() -> None:
+    token = _register_and_login("followupupdate")
+    headers = {"Authorization": f"Bearer {token}"}
+    note_id = client.post("/notes", json={"value": "update note"}, headers=headers).json()["id"]
+    created = client.post(
+        f"/notes/{note_id}/followups",
+        json={"descriptionText": "old description", "type": "task"},
+        headers=headers,
+    )
+    followup_id = created.json()["id"]
+    initial_edited_at = created.json()["editedAtUTC"]
+
+    updated = client.patch(
+        f"/followups/{followup_id}",
+        json={"descriptionText": "new description", "type": "reminder"},
+        headers=headers,
+    )
+    assert updated.status_code == 200
+    body = updated.json()
+    assert body["id"] == followup_id
+    assert body["descriptionText"] == "new description"
+    assert body["type"] == "reminder"
+    assert body["completed"] is False
+    assert body["noteID"] == note_id
+    assert body["editedAtUTC"] != initial_edited_at
+
+
+def test_update_followup_partial_fields_success() -> None:
+    token = _register_and_login("followupupdatepartial")
+    headers = {"Authorization": f"Bearer {token}"}
+    note_id = client.post("/notes", json={"value": "partial note"}, headers=headers).json()["id"]
+    created = client.post(
+        f"/notes/{note_id}/followups",
+        json={"descriptionText": "initial description", "type": "task"},
+        headers=headers,
+    )
+    followup_id = created.json()["id"]
+
+    updated_description = client.patch(
+        f"/followups/{followup_id}",
+        json={"descriptionText": "description only"},
+        headers=headers,
+    )
+    assert updated_description.status_code == 200
+    assert updated_description.json()["descriptionText"] == "description only"
+    assert updated_description.json()["type"] == "task"
+
+    updated_type = client.patch(
+        f"/followups/{followup_id}",
+        json={"type": "checkup"},
+        headers=headers,
+    )
+    assert updated_type.status_code == 200
+    assert updated_type.json()["descriptionText"] == "description only"
+    assert updated_type.json()["type"] == "checkup"
+
+
+def test_update_followup_rejects_empty_payload() -> None:
+    token = _register_and_login("followupupdateempty")
+    headers = {"Authorization": f"Bearer {token}"}
+    note_id = client.post("/notes", json={"value": "empty payload note"}, headers=headers).json()["id"]
+    followup_id = client.post(
+        f"/notes/{note_id}/followups",
+        json={"descriptionText": "existing", "type": "task"},
+        headers=headers,
+    ).json()["id"]
+
+    response = client.patch(f"/followups/{followup_id}", json={}, headers=headers)
+    assert response.status_code == 422
+
+
+def test_update_followup_validation_for_bad_payloads() -> None:
+    token = _register_and_login("followupupdatevalidation")
+    headers = {"Authorization": f"Bearer {token}"}
+    note_id = client.post("/notes", json={"value": "validation note"}, headers=headers).json()["id"]
+    followup_id = client.post(
+        f"/notes/{note_id}/followups",
+        json={"descriptionText": "existing", "type": "task"},
+        headers=headers,
+    ).json()["id"]
+
+    empty_type = client.patch(
+        f"/followups/{followup_id}",
+        json={"type": ""},
+        headers=headers,
+    )
+    assert empty_type.status_code == 422
+
+    too_long_description = client.patch(
+        f"/followups/{followup_id}",
+        json={"descriptionText": "a" * 513},
+        headers=headers,
+    )
+    assert too_long_description.status_code == 422
+
+
 def test_followup_completion_requires_authentication() -> None:
     response = client.patch(
         "/followups/some-followup/completion",
         json={"completed": True},
+    )
+    assert response.status_code == 401
+
+
+def test_update_followup_requires_authentication() -> None:
+    response = client.patch(
+        "/followups/some-followup",
+        json={"descriptionText": "updated"},
     )
     assert response.status_code == 401
 
@@ -919,6 +1023,27 @@ def test_followup_completion_rejects_unowned_followup() -> None:
     assert response.status_code == 404
 
 
+def test_update_followup_rejects_unowned_followup() -> None:
+    token_a = _register_and_login("followupupdateowna")
+    token_b = _register_and_login("followupupdateownb")
+    headers_a = {"Authorization": f"Bearer {token_a}"}
+    headers_b = {"Authorization": f"Bearer {token_b}"}
+
+    note_id = client.post("/notes", json={"value": "private"}, headers=headers_a).json()["id"]
+    followup_id = client.post(
+        f"/notes/{note_id}/followups",
+        json={"descriptionText": "private followup", "type": "task"},
+        headers=headers_a,
+    ).json()["id"]
+
+    response = client.patch(
+        f"/followups/{followup_id}",
+        json={"descriptionText": "hijack"},
+        headers=headers_b,
+    )
+    assert response.status_code == 404
+
+
 def test_followup_completion_rejects_unknown_followup() -> None:
     token = _register_and_login("followupmissing")
     headers = {"Authorization": f"Bearer {token}"}
@@ -926,6 +1051,18 @@ def test_followup_completion_rejects_unknown_followup() -> None:
     response = client.patch(
         "/followups/not-a-real-id/completion",
         json={"completed": True},
+        headers=headers,
+    )
+    assert response.status_code == 404
+
+
+def test_update_followup_rejects_unknown_followup() -> None:
+    token = _register_and_login("followupupdatemissing")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    response = client.patch(
+        "/followups/not-a-real-id",
+        json={"descriptionText": "updated"},
         headers=headers,
     )
     assert response.status_code == 404

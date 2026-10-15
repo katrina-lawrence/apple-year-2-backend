@@ -181,6 +181,17 @@ class FollowupCompletionRequest(BaseModel):
     completed: bool
 
 
+class FollowupUpdateRequest(BaseModel):
+    descriptionText: str | None = Field(default=None, min_length=1, max_length=512)
+    type: str | None = Field(default=None, min_length=1, max_length=64)
+
+    @model_validator(mode="after")
+    def validate_at_least_one_field(self) -> "FollowupUpdateRequest":
+        if self.model_fields_set:
+            return self
+        raise ValueError("At least one field must be provided")
+
+
 class SyncNoteRequest(BaseModel):
     value: str | None = Field(default=None, min_length=1, max_length=512)
     summary: str | None = None
@@ -673,6 +684,30 @@ def set_followup_completion(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Followup not found")
 
     followup.completed = payload.completed
+    followup.edited_at_utc = datetime.now(timezone.utc)
+    db.add(followup)
+    db.commit()
+    db.refresh(followup)
+    return build_followup_response(followup)
+
+
+@app.patch("/followups/{followup_id}", response_model=FollowupResponse)
+def update_followup(
+    followup_id: str,
+    payload: FollowupUpdateRequest,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+) -> FollowupResponse:
+    followup = db.query(Followup).filter(Followup.id == followup_id, Followup.owner_id == user_id).first()
+    if followup is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Followup not found")
+
+    changed_fields = payload.model_dump(exclude_unset=True)
+    if "descriptionText" in changed_fields:
+        followup.description_text = payload.descriptionText  # type: ignore[assignment]
+    if "type" in changed_fields:
+        followup.type = payload.type  # type: ignore[assignment]
+
     followup.edited_at_utc = datetime.now(timezone.utc)
     db.add(followup)
     db.commit()

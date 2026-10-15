@@ -96,6 +96,7 @@ docker compose up --build
 - `POST /followups` create follow-up for authenticated user with `{ "descriptionText": "...", "type": "...", "noteID": "note-id?" }` (`noteID` is optional; when provided, it must reference an owned note; `completed` starts as `false`)
 - `GET /followups` list all follow-ups for authenticated user (includes both note-linked and orphan follow-ups)
 - `GET /notes/{note_id}/followups` list follow-ups for one owned note
+- `PATCH /followups/{followup_id}` with `{ "descriptionText": "...?", "type": "...?" }` to edit one or both attributes (at least one field required)
 - `PATCH /followups/{followup_id}/completion` with `{ "completed": true | false }` to mark/unmark completion
 - `DELETE /followups/{followup_id}` delete one owned follow-up
 
