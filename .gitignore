@@ -6,3 +6,5 @@ app.db
 test_app.db
 *.egg-info/
 .env
+.DS_Store
+
