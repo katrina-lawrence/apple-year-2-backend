@@ -62,7 +62,7 @@ class Followup(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, index=True)
     owner_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
-    note_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    note_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     description_text: Mapped[str] = mapped_column(Text, nullable=False)
     type: Mapped[str] = mapped_column(String(64), nullable=False)
     completed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
@@ -163,11 +163,15 @@ class CreateFollowupRequest(BaseModel):
     type: str = Field(min_length=1, max_length=64)
 
 
+class CreateUserFollowupRequest(CreateFollowupRequest):
+    noteID: str | None = None
+
+
 class FollowupResponse(BaseModel):
     id: str
     descriptionText: str
     type: str
-    noteID: str
+    noteID: str | None
     createdAtUTC: datetime
     editedAtUTC: datetime
     completed: bool
@@ -589,6 +593,31 @@ def create_followup_for_note(
         id=str(uuid4()),
         owner_id=user_id,
         note_id=note_id,
+        description_text=payload.descriptionText,
+        type=payload.type,
+        completed=False,
+    )
+    db.add(followup)
+    db.commit()
+    db.refresh(followup)
+    return build_followup_response(followup)
+
+
+@app.post("/followups", response_model=FollowupResponse, status_code=status.HTTP_201_CREATED)
+def create_followup_for_user(
+    payload: CreateUserFollowupRequest,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+) -> FollowupResponse:
+    if payload.noteID is not None:
+        note = db.query(Note).filter(Note.id == payload.noteID, Note.owner_id == user_id).first()
+        if note is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Note not found")
+
+    followup = Followup(
+        id=str(uuid4()),
+        owner_id=user_id,
+        note_id=payload.noteID,
         description_text=payload.descriptionText,
         type=payload.type,
         completed=False,

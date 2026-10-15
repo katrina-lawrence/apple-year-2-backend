@@ -659,6 +659,64 @@ def test_create_followup_for_owned_note() -> None:
     assert body["editedAtUTC"]
 
 
+def test_create_followup_without_parent_note() -> None:
+    token = _register_and_login("followuporphan")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    created = client.post(
+        "/followups",
+        json={
+            "descriptionText": "General reminder",
+            "type": "reminder",
+        },
+        headers=headers,
+    )
+    assert created.status_code == 201
+    body = created.json()
+    assert body["id"]
+    assert body["noteID"] is None
+    assert body["descriptionText"] == "General reminder"
+    assert body["type"] == "reminder"
+    assert body["completed"] is False
+
+
+def test_create_followup_with_note_id_on_user_endpoint() -> None:
+    token = _register_and_login("followupuserendpoint")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    note_id = client.post("/notes", json={"value": "has parent"}, headers=headers).json()["id"]
+    created = client.post(
+        "/followups",
+        json={
+            "descriptionText": "linked via user endpoint",
+            "type": "task",
+            "noteID": note_id,
+        },
+        headers=headers,
+    )
+    assert created.status_code == 201
+    assert created.json()["noteID"] == note_id
+
+
+def test_create_followup_with_unowned_note_id_on_user_endpoint_rejected() -> None:
+    token_a = _register_and_login("followupuserendowna")
+    token_b = _register_and_login("followupuserendownb")
+    headers_a = {"Authorization": f"Bearer {token_a}"}
+    headers_b = {"Authorization": f"Bearer {token_b}"}
+
+    note_id = client.post("/notes", json={"value": "private note"}, headers=headers_a).json()["id"]
+    response = client.post(
+        "/followups",
+        json={
+            "descriptionText": "Unauthorized attempt",
+            "type": "checkup",
+            "noteID": note_id,
+        },
+        headers=headers_b,
+    )
+    assert response.status_code == 404
+
+
 def test_create_followup_rejects_unowned_note() -> None:
     token_a = _register_and_login("followupunowneda")
     token_b = _register_and_login("followupunownedb")
@@ -738,6 +796,13 @@ def test_followup_endpoints_require_authentication() -> None:
     assert client.get("/followups").status_code == 401
     assert (
         client.post(
+            "/followups",
+            json={"descriptionText": "x", "type": "task"},
+        ).status_code
+        == 401
+    )
+    assert (
+        client.post(
             "/notes/some-note/followups",
             json={"descriptionText": "x", "type": "task"},
         ).status_code
@@ -764,6 +829,13 @@ def test_followup_validation_for_bad_payloads() -> None:
         headers=headers,
     )
     assert too_long_description.status_code == 422
+
+    missing_description = client.post(
+        "/followups",
+        json={"type": "task"},
+        headers=headers,
+    )
+    assert missing_description.status_code == 422
 
 
 def test_followup_creation_time_is_recorded_in_db() -> None:
