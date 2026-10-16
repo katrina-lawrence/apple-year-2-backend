@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import os
 import secrets
+import json
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 from uuid import uuid4
 
 import jwt
 from fastapi import Depends, FastAPI, HTTPException, Response, status
 from fastapi.security import OAuth2PasswordBearer
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, ValidationError, model_validator
 from pwdlib import PasswordHash
 from sqlalchemy import JSON, Boolean, DateTime, Float, String, Text, create_engine, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
@@ -22,6 +26,7 @@ JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "60"))
 JWT_REFRESH_EXPIRE_DAYS = int(os.getenv("JWT_REFRESH_EXPIRE_DAYS", "30"))
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./app.db")
+PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 
 password_hash = PasswordHash.recommended()
 
@@ -205,6 +210,28 @@ class SyncNoteRequest(BaseModel):
 class SyncNoteResponse(BaseModel):
     note: NoteResponse
     followups: list[FollowupResponse]
+
+
+class ProcessNoteRequest(BaseModel):
+    noteID: str
+
+
+class ProcessedBalanceDue(BaseModel):
+    amount: float | None
+    currency: str | None
+
+
+class ProcessedAction(BaseModel):
+    type: str
+    description: str
+
+
+class ProcessedNoteResponse(BaseModel):
+    summary: str
+    categories: list[str]
+    balance_due: ProcessedBalanceDue
+    actions: list[ProcessedAction]
+    appointment_timing: str | None
 
 
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
@@ -444,6 +471,85 @@ def build_followup_response(followup: Followup) -> FollowupResponse:
     )
 
 
+def _load_prompt_text(file_name: str) -> str:
+    try:
+        # Guard against path traversal; prompt files must stay under PROMPTS_DIR.
+        prompts_root = PROMPTS_DIR.resolve()
+        prompt_path = (prompts_root / file_name).resolve()
+        prompt_path.relative_to(prompts_root)
+        return prompt_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Prompt file missing") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Prompt file missing") from exc
+
+
+def _extract_json_candidate(raw_text: str) -> str:
+    text = raw_text.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if len(lines) >= 3 and lines[-1].strip() == "```":
+            text = "\n".join(lines[1:-1]).strip()
+    return text
+
+
+def _call_ai_note_processor(system_prompt: str, user_prompt: str) -> ProcessedNoteResponse:
+    ai_endpoint = os.getenv("AI_ENDPOINT")
+    ai_model = os.getenv("AI_MODEL")
+    ai_api_key = os.getenv("AI_API_KEY")
+    if not ai_endpoint or not ai_model or not ai_api_key:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="AI provider is not configured",
+        )
+
+    payload = {
+        "model": ai_model,
+        "max_tokens": 1024,
+        "system": system_prompt,
+        "messages": [{"role": "user", "content": user_prompt}],
+    }
+    request = Request(
+        ai_endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "x-api-key": ai_api_key,
+            "Authorization": f"Bearer {ai_api_key}",
+            "anthropic-version": "2023-06-01",
+        },
+    )
+    try:
+        with urlopen(request, timeout=30) as response:
+            response_body = response.read().decode("utf-8")
+    except (HTTPError, URLError, TimeoutError) as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="AI provider request failed") from exc
+
+    try:
+        provider_json = json.loads(response_body)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="AI provider returned invalid JSON") from exc
+
+    content_blocks = provider_json.get("content")
+    if not isinstance(content_blocks, list):
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="AI provider returned invalid content")
+    text_blocks = [
+        block.get("text", "")
+        for block in content_blocks
+        if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str)
+    ]
+    if not text_blocks:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="AI provider returned empty response")
+
+    parsed_content = _extract_json_candidate("\n".join(text_blocks))
+    try:
+        parsed_json = json.loads(parsed_content)
+        return ProcessedNoteResponse.model_validate(parsed_json)
+    except (json.JSONDecodeError, ValidationError) as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="AI provider returned invalid extraction JSON") from exc
+
+
 @app.post("/notes", response_model=NoteResponse, status_code=status.HTTP_201_CREATED)
 def create_note(
     payload: NoteCreateRequest,
@@ -612,6 +718,25 @@ def create_followup_for_note(
     db.commit()
     db.refresh(followup)
     return build_followup_response(followup)
+
+
+@app.post("/notes/process", response_model=ProcessedNoteResponse)
+def process_note(
+    payload: ProcessNoteRequest,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+) -> ProcessedNoteResponse:
+    note = db.query(Note).filter(Note.id == payload.noteID, Note.owner_id == user_id).first()
+    if note is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Note not found")
+
+    system_prompt = _load_prompt_text("PromptSystem.md")
+    user_prompt_template = _load_prompt_text("PromptUser.md")
+    reference_iso = note.created_at_utc.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    user_prompt = (
+        user_prompt_template.replace("{{referenceISO}}", reference_iso).replace("{{noteText}}", note.value)
+    )
+    return _call_ai_note_processor(system_prompt, user_prompt)
 
 
 @app.post("/followups", response_model=FollowupResponse, status_code=status.HTTP_201_CREATED)

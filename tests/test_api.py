@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 from datetime import datetime
+from urllib.error import URLError
 
 import pytest
 
@@ -1114,3 +1116,177 @@ def test_delete_followup_rejects_unknown_followup() -> None:
 
     response = client.delete("/followups/not-a-real-id", headers=headers)
     assert response.status_code == 404
+
+
+class _FakeAIResponse:
+    def __init__(self, payload: dict) -> None:
+        self._payload = payload
+
+    def read(self) -> bytes:
+        return json.dumps(self._payload).encode("utf-8")
+
+    def __enter__(self) -> "_FakeAIResponse":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        return None
+
+
+def test_process_note_requires_authentication() -> None:
+    response = client.post("/notes/process", json={"noteID": "some-note-id"})
+    assert response.status_code == 401
+
+
+def test_process_note_returns_404_for_unowned_note() -> None:
+    token_a = _register_and_login("processownera")
+    token_b = _register_and_login("processownerb")
+    headers_a = {"Authorization": f"Bearer {token_a}"}
+    headers_b = {"Authorization": f"Bearer {token_b}"}
+    note_id = client.post("/notes", json={"value": "owner a only"}, headers=headers_a).json()["id"]
+
+    response = client.post("/notes/process", json={"noteID": note_id}, headers=headers_b)
+    assert response.status_code == 404
+
+
+def test_process_note_returns_500_when_ai_provider_not_configured(monkeypatch) -> None:
+    token = _register_and_login("processmissingcfg")
+    headers = {"Authorization": f"Bearer {token}"}
+    note_id = client.post("/notes", json={"value": "config check"}, headers=headers).json()["id"]
+    monkeypatch.delenv("AI_ENDPOINT", raising=False)
+    monkeypatch.delenv("AI_MODEL", raising=False)
+    monkeypatch.delenv("AI_API_KEY", raising=False)
+
+    response = client.post("/notes/process", json={"noteID": note_id}, headers=headers)
+    assert response.status_code == 500
+    assert response.json()["detail"] == "AI provider is not configured"
+
+
+def test_process_note_success_with_provider_response(monkeypatch) -> None:
+    token = _register_and_login("processsuccess")
+    headers = {"Authorization": f"Bearer {token}"}
+    note = client.post("/notes", json={"value": "Patient owes $120 and needs call back in March."}, headers=headers)
+    note_id = note.json()["id"]
+
+    monkeypatch.setenv("AI_ENDPOINT", "https://provider.example/v1/messages")
+    monkeypatch.setenv("AI_MODEL", "test-model")
+    monkeypatch.setenv("AI_API_KEY", "test-key")
+
+    captured: dict[str, str] = {}
+
+    def _fake_urlopen(request, timeout):  # noqa: ANN001
+        assert timeout == 30
+        captured["endpoint"] = request.full_url
+        body = json.loads(request.data.decode("utf-8"))
+        captured["system"] = body["system"]
+        captured["user"] = body["messages"][0]["content"]
+        return _FakeAIResponse(
+            {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(
+                            {
+                                "summary": "Patient has an outstanding balance and requested follow-up.",
+                                "categories": ["Payment", "Appointment"],
+                                "balance_due": {"amount": 120, "currency": "USD"},
+                                "actions": [{"type": "Appointment", "description": "Call patient back"}],
+                                "appointment_timing": "March",
+                            }
+                        ),
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr("app.main.urlopen", _fake_urlopen)
+    response = client.post("/notes/process", json={"noteID": note_id}, headers=headers)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["summary"]
+    assert body["categories"] == ["Payment", "Appointment"]
+    assert body["balance_due"] == {"amount": 120.0, "currency": "USD"}
+    assert body["actions"] == [{"type": "Appointment", "description": "Call patient back"}]
+    assert body["appointment_timing"] == "March"
+
+    assert captured["endpoint"] == "https://provider.example/v1/messages"
+    assert "Analyze the user's dental note and return:" in captured["system"]
+    assert "Patient owes $120 and needs call back in March." in captured["user"]
+    assert "Reference date (note created date):" in captured["user"]
+
+
+def test_process_note_returns_502_for_provider_network_failure(monkeypatch) -> None:
+    token = _register_and_login("processnetfail")
+    headers = {"Authorization": f"Bearer {token}"}
+    note_id = client.post("/notes", json={"value": "network fail"}, headers=headers).json()["id"]
+
+    monkeypatch.setenv("AI_ENDPOINT", "https://provider.example/v1/messages")
+    monkeypatch.setenv("AI_MODEL", "test-model")
+    monkeypatch.setenv("AI_API_KEY", "test-key")
+
+    def _raise_network_error(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise URLError("network down")
+
+    monkeypatch.setattr("app.main.urlopen", _raise_network_error)
+    response = client.post("/notes/process", json={"noteID": note_id}, headers=headers)
+    assert response.status_code == 502
+    assert response.json()["detail"] == "AI provider request failed"
+
+
+def test_process_note_returns_502_for_invalid_extraction_payload(monkeypatch) -> None:
+    token = _register_and_login("processbadpayload")
+    headers = {"Authorization": f"Bearer {token}"}
+    note_id = client.post("/notes", json={"value": "bad payload"}, headers=headers).json()["id"]
+
+    monkeypatch.setenv("AI_ENDPOINT", "https://provider.example/v1/messages")
+    monkeypatch.setenv("AI_MODEL", "test-model")
+    monkeypatch.setenv("AI_API_KEY", "test-key")
+
+    def _fake_urlopen(*args, **kwargs):  # noqa: ANN002, ANN003
+        return _FakeAIResponse({"content": [{"type": "text", "text": "{\"summary\": \"missing fields\"}"}]})
+
+    monkeypatch.setattr("app.main.urlopen", _fake_urlopen)
+    response = client.post("/notes/process", json={"noteID": note_id}, headers=headers)
+    assert response.status_code == 502
+    assert response.json()["detail"] == "AI provider returned invalid extraction JSON"
+
+
+def test_process_note_rejects_path_traversal_in_prompt_loader(monkeypatch) -> None:
+    token = _register_and_login("processprompttraversal")
+    headers = {"Authorization": f"Bearer {token}"}
+    note_id = client.post("/notes", json={"value": "prompt traversal"}, headers=headers).json()["id"]
+
+    monkeypatch.setenv("AI_ENDPOINT", "https://provider.example/v1/messages")
+    monkeypatch.setenv("AI_MODEL", "test-model")
+    monkeypatch.setenv("AI_API_KEY", "test-key")
+
+    from app.main import _load_prompt_text as original_loader
+    def _patched_loader(file_name: str):  # noqa: ANN001
+        if file_name == "PromptSystem.md":
+            return original_loader("../README.md")
+        return original_loader(file_name)
+
+    monkeypatch.setattr("app.main._load_prompt_text", _patched_loader)
+    response = client.post("/notes/process", json={"noteID": note_id}, headers=headers)
+    assert response.status_code == 500
+    assert response.json()["detail"] == "Prompt file missing"
+
+
+def test_process_note_rejects_absolute_path_in_prompt_loader(monkeypatch) -> None:
+    token = _register_and_login("processpromptabsolute")
+    headers = {"Authorization": f"Bearer {token}"}
+    note_id = client.post("/notes", json={"value": "prompt absolute path"}, headers=headers).json()["id"]
+
+    monkeypatch.setenv("AI_ENDPOINT", "https://provider.example/v1/messages")
+    monkeypatch.setenv("AI_MODEL", "test-model")
+    monkeypatch.setenv("AI_API_KEY", "test-key")
+
+    from app.main import _load_prompt_text as original_loader
+    def _patched_loader(file_name: str):  # noqa: ANN001
+        if file_name == "PromptSystem.md":
+            return original_loader("/etc/passwd")
+        return original_loader(file_name)
+
+    monkeypatch.setattr("app.main._load_prompt_text", _patched_loader)
+    response = client.post("/notes/process", json={"noteID": note_id}, headers=headers)
+    assert response.status_code == 500
+    assert response.json()["detail"] == "Prompt file missing"

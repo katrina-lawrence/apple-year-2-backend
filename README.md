@@ -88,6 +88,8 @@ docker compose up --build
 - `POST /change-password` with JSON body `{ "current_password": "...", "new_password": "..." }`
 - `POST /notes` with JSON body
   `{ "value": "...", "summary": "...?", "balanceDueAmount": 10.5?, "balanceDueCurrency": "USD"?, "categories": ["..."]?, "appointmentTiming": "...?" }`
+- `POST /notes/process` with JSON body `{ "noteID": "..." }` analyzes one owned note using configured AI provider and returns:
+  `{ "summary": "...", "categories": ["..."], "balance_due": { "amount": 10.5|null, "currency": "USD"|null }, "actions": [{ "type": "...", "description": "..." }], "appointment_timing": "..."|null }`
 - `GET /notes` list authenticated user's notes
 - `GET /notes/{note_id}` fetch one of authenticated user's notes
 - `PUT /notes/{note_id}` with JSON body containing one or more writable note fields to patch that note (updates `editedAtUTC`)
@@ -132,3 +134,6 @@ curl -s http://127.0.0.1:8000/user \
 - `JWT_REFRESH_EXPIRE_DAYS` (default: `30`)
 - `DATABASE_URL` (default: `sqlite:///./app.db`)
 - `SEED_SAMPLE_DATA` (default: `false`; set to `true` in local/dev to insert sample rows at startup)
+- `AI_ENDPOINT` (Anthropic-style messages endpoint, e.g. `https://api.anthropic.com/v1/messages`)
+- `AI_MODEL` (provider model name)
+- `AI_API_KEY` (API key used for note processing requests)
