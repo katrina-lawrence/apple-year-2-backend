@@ -2,17 +2,20 @@ services:
   api:
     build: .
     ports:
-      - "8000:8000"
+      - "8443:8000"
     environment:
       JWT_SECRET_KEY: ${JWT_SECRET_KEY}
       JWT_EXPIRE_MINUTES: ${JWT_EXPIRE_MINUTES:-60}
       JWT_REFRESH_EXPIRE_DAYS: ${JWT_REFRESH_EXPIRE_DAYS:-30}
       DATABASE_URL: ${DATABASE_URL:-sqlite:////app/data/app.db}
+      TLS_CERT_FILE: ${TLS_CERT_FILE:-/app/certs/server.crt}
+      TLS_KEY_FILE: ${TLS_KEY_FILE:-/app/certs/server.key}
       AI_ENDPOINT: ${AI_ENDPOINT}
       AI_MODEL: ${AI_MODEL}
       AI_API_KEY: ${AI_API_KEY}
     volumes:
       - fastapi_auth_data:/app/data
+      - ./certs:/app/certs:ro
     restart: unless-stopped
 
 volumes:

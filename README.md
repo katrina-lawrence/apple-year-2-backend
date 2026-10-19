@@ -32,6 +32,14 @@ To load sample seed data in local/dev startup:
 SEED_SAMPLE_DATA=true uvicorn app.main:app --reload
 ```
 
+To run local HTTPS directly in Uvicorn:
+
+```bash
+uvicorn app.main:app --reload \
+  --ssl-certfile ./certs/server.crt \
+  --ssl-keyfile ./certs/server.key
+```
+
 ## Run With Docker
 
 Docker Compose is optional. Plain Docker works directly.
@@ -44,8 +52,9 @@ cp .env.example .env
 
 ```bash
 docker build -t fastapi-auth-api .
-docker run --rm -p 8000:8000 \
+docker run --rm -p 8443:8000 \
   --env-file .env \
+  -v "$(pwd)/certs:/app/certs:ro" \
   fastapi-auth-api
 ```
 
@@ -53,8 +62,9 @@ To persist SQLite data across container restarts:
 
 ```bash
 docker volume create fastapi_auth_data
-docker run --rm -p 8000:8000 \
+docker run --rm -p 8443:8000 \
   --env-file .env \
+  -v "$(pwd)/certs:/app/certs:ro" \
   -v fastapi_auth_data:/app/data \
   fastapi-auth-api
 ```
@@ -70,6 +80,67 @@ cp .env.example .env
 ```bash
 docker compose up --build
 ```
+
+## TLS Setup (Private IP, No Hostname Binding)
+
+This project is configured to run HTTPS in Uvicorn using:
+- `TLS_CERT_FILE` for the leaf certificate path
+- `TLS_KEY_FILE` for the private key path
+
+Because your server hostname/IP is not stable, use certificate trust + public-key pinning instead of hostname validation.
+
+### 1) Create a private CA and server certificate
+
+```bash
+mkdir -p certs
+
+openssl genrsa -out certs/ca.key 4096
+openssl req -x509 -new -nodes -key certs/ca.key -sha256 -days 3650 \
+  -out certs/ca.crt \
+  -subj "/CN=fastapi-private-root-ca"
+
+openssl genrsa -out certs/server.key 2048
+openssl req -new -key certs/server.key -out certs/server.csr \
+  -subj "/CN=fastapi-private-server"
+
+cat > certs/server-ext.cnf <<'EOF'
+basicConstraints=CA:FALSE
+keyUsage=digitalSignature,keyEncipherment
+extendedKeyUsage=serverAuth
+EOF
+
+openssl x509 -req -in certs/server.csr \
+  -CA certs/ca.crt -CAkey certs/ca.key -CAcreateserial \
+  -out certs/server.crt -days 825 -sha256 \
+  -extfile certs/server-ext.cnf
+```
+
+### 2) Start the API with HTTPS
+
+```bash
+cp .env.example .env
+docker compose up --build
+```
+
+The API will be exposed on `https://127.0.0.1:8443`.
+
+### 3) Export the SPKI pin for iOS
+
+```bash
+openssl x509 -in certs/server.crt -pubkey -noout \
+  | openssl pkey -pubin -outform der \
+  | openssl dgst -sha256 -binary \
+  | openssl base64
+```
+
+Use that base64 SHA-256 value as the iOS SPKI pin.
+
+### 4) iOS trust and pinning requirements
+
+- Bundle `certs/ca.crt` in the app and trust only that CA for this connection.
+- Disable hostname-based trust checks for this private endpoint.
+- Verify the server leaf SPKI hash matches one of the pinned hashes.
+- Keep at least two pins in the app (`active` + `next`) to support key rotation.
 
 ## Endpoints
 
@@ -108,22 +179,22 @@ Password validation during registration is implemented through an extensible `va
 
 ```bash
 # 1) Register
-curl -s -X POST http://127.0.0.1:8000/register \
+curl --cacert certs/ca.crt -s -X POST https://127.0.0.1:8443/register \
   -H 'content-type: application/json' \
   -d '{"username":"alice","password":"supersecret123"}'
 
 # 2) Login
-curl -s -X POST http://127.0.0.1:8000/login \
+curl --cacert certs/ca.crt -s -X POST https://127.0.0.1:8443/login \
   -H 'content-type: application/json' \
   -d '{"username":"alice","password":"supersecret123"}'
 
 # 3) Refresh access token
-curl -s -X POST http://127.0.0.1:8000/refresh \
+curl --cacert certs/ca.crt -s -X POST https://127.0.0.1:8443/refresh \
   -H 'content-type: application/json' \
   -d '{"refresh_token":"<refresh-token-from-login>"}'
 
 # 4) Get user
-curl -s http://127.0.0.1:8000/user \
+curl --cacert certs/ca.crt -s https://127.0.0.1:8443/user \
   -H 'Authorization: Bearer <token-from-login>'
 ```
 
@@ -134,6 +205,8 @@ curl -s http://127.0.0.1:8000/user \
 - `JWT_REFRESH_EXPIRE_DAYS` (default: `30`)
 - `DATABASE_URL` (default: `sqlite:///./app.db`)
 - `SEED_SAMPLE_DATA` (default: `false`; set to `true` in local/dev to insert sample rows at startup)
+- `TLS_CERT_FILE` (default in compose: `/app/certs/server.crt`)
+- `TLS_KEY_FILE` (default in compose: `/app/certs/server.key`)
 - `AI_ENDPOINT` (Anthropic-style messages endpoint, e.g. `https://api.anthropic.com/v1/messages`)
 - `AI_MODEL` (provider model name)
 - `AI_API_KEY` (API key used for note processing requests)
