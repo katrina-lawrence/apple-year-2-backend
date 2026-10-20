@@ -1232,6 +1232,77 @@ def test_process_note_returns_502_for_provider_network_failure(monkeypatch) -> N
     assert response.json()["detail"] == "AI provider request failed"
 
 
+def test_process_note_accepts_null_balance_due(monkeypatch) -> None:
+    token = _register_and_login("processnullbalance")
+    headers = {"Authorization": f"Bearer {token}"}
+    note_id = client.post("/notes", json={"value": "No payment in note"}, headers=headers).json()["id"]
+
+    monkeypatch.setenv("AI_ENDPOINT", "https://provider.example/v1/messages")
+    monkeypatch.setenv("AI_MODEL", "test-model")
+    monkeypatch.setenv("AI_API_KEY", "test-key")
+
+    def _fake_urlopen(*args, **kwargs):  # noqa: ANN002, ANN003
+        return _FakeAIResponse(
+            {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(
+                            {
+                                "summary": "No balance mentioned.",
+                                "categories": [],
+                                "balance_due": None,
+                                "actions": [],
+                                "appointment_timing": None,
+                            }
+                        ),
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr("app.main.urlopen", _fake_urlopen)
+    response = client.post("/notes/process", json={"noteID": note_id}, headers=headers)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["balance_due"] == {"amount": None, "currency": None}
+
+
+def test_process_note_accepts_missing_balance_due(monkeypatch) -> None:
+    token = _register_and_login("processmissingbalance")
+    headers = {"Authorization": f"Bearer {token}"}
+    note_id = client.post("/notes", json={"value": "No payment in note"}, headers=headers).json()["id"]
+
+    monkeypatch.setenv("AI_ENDPOINT", "https://provider.example/v1/messages")
+    monkeypatch.setenv("AI_MODEL", "test-model")
+    monkeypatch.setenv("AI_API_KEY", "test-key")
+
+    def _fake_urlopen(*args, **kwargs):  # noqa: ANN002, ANN003
+        return _FakeAIResponse(
+            {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(
+                            {
+                                "summary": "No balance mentioned.",
+                                "categories": [],
+                                "actions": [],
+                                "appointment_timing": None,
+                            }
+                        ),
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr("app.main.urlopen", _fake_urlopen)
+    response = client.post("/notes/process", json={"noteID": note_id}, headers=headers)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["balance_due"] == {"amount": None, "currency": None}
+
+
 def test_process_note_returns_502_for_invalid_extraction_payload(monkeypatch) -> None:
     token = _register_and_login("processbadpayload")
     headers = {"Authorization": f"Bearer {token}"}

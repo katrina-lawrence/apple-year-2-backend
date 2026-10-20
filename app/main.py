@@ -493,6 +493,19 @@ def _extract_json_candidate(raw_text: str) -> str:
     return text
 
 
+def _normalize_processed_note_payload(parsed_json: dict[str, object]) -> dict[str, object]:
+    normalized = dict(parsed_json)
+    balance_due = normalized.get("balance_due")
+    if balance_due is None:
+        normalized["balance_due"] = {"amount": None, "currency": None}
+    elif isinstance(balance_due, dict):
+        normalized["balance_due"] = {
+            "amount": balance_due.get("amount"),
+            "currency": balance_due.get("currency"),
+        }
+    return normalized
+
+
 def _call_ai_note_processor(system_prompt: str, user_prompt: str) -> ProcessedNoteResponse:
     ai_endpoint = os.getenv("AI_ENDPOINT")
     ai_model = os.getenv("AI_MODEL")
@@ -545,7 +558,10 @@ def _call_ai_note_processor(system_prompt: str, user_prompt: str) -> ProcessedNo
     parsed_content = _extract_json_candidate("\n".join(text_blocks))
     try:
         parsed_json = json.loads(parsed_content)
-        return ProcessedNoteResponse.model_validate(parsed_json)
+        if isinstance(parsed_json, dict):
+            parsed_json = _normalize_processed_note_payload(parsed_json)
+        result = ProcessedNoteResponse.model_validate(parsed_json)
+        return result
     except (json.JSONDecodeError, ValidationError) as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="AI provider returned invalid extraction JSON") from exc
 
