@@ -6,6 +6,7 @@ import json
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Literal
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from uuid import uuid4
@@ -27,6 +28,8 @@ JWT_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "60"))
 JWT_REFRESH_EXPIRE_DAYS = int(os.getenv("JWT_REFRESH_EXPIRE_DAYS", "30"))
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./app.db")
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
+# Match the note and follow-up description editors in the iOS app.
+MAX_TEXT_LENGTH = 2048
 
 password_hash = PasswordHash.recommended()
 
@@ -128,7 +131,7 @@ class StatusResponse(BaseModel):
 
 
 class NoteCreateRequest(BaseModel):
-    value: str = Field(min_length=1, max_length=512)
+    value: str = Field(min_length=1, max_length=MAX_TEXT_LENGTH)
     summary: str | None = None
     balanceDueAmount: float | None = None
     balanceDueCurrency: str | None = None
@@ -137,7 +140,7 @@ class NoteCreateRequest(BaseModel):
 
 
 class NoteUpdateRequest(BaseModel):
-    value: str | None = Field(default=None, min_length=1, max_length=512)
+    value: str | None = Field(default=None, min_length=1, max_length=MAX_TEXT_LENGTH)
     summary: str | None = None
     balanceDueAmount: float | None = None
     balanceDueCurrency: str | None = None
@@ -164,7 +167,7 @@ class NoteResponse(BaseModel):
 
 
 class CreateFollowupRequest(BaseModel):
-    descriptionText: str = Field(min_length=1, max_length=512)
+    descriptionText: str = Field(min_length=1, max_length=MAX_TEXT_LENGTH)
     type: str = Field(min_length=1, max_length=64)
 
 
@@ -186,8 +189,45 @@ class FollowupCompletionRequest(BaseModel):
     completed: bool
 
 
+class BackupNote(NoteCreateRequest):
+    id: str = Field(min_length=1, max_length=36)
+    createdAtUTC: datetime
+    editedAtUTC: datetime
+
+
+class BackupFollowup(CreateUserFollowupRequest):
+    id: str = Field(min_length=1, max_length=36)
+    createdAtUTC: datetime
+    editedAtUTC: datetime
+    isCompleted: bool
+
+
+class BackupRestoreRequest(BaseModel):
+    formatVersion: Literal[1]
+    exportedAtUTC: datetime
+    notes: list[BackupNote]
+    followups: list[BackupFollowup]
+
+    @model_validator(mode="after")
+    def validate_record_ids(self) -> "BackupRestoreRequest":
+        note_ids = {note.id for note in self.notes}
+        followup_ids = {followup.id for followup in self.followups}
+        if len(note_ids) != len(self.notes) or len(followup_ids) != len(self.followups):
+            raise ValueError("Backup contains duplicate record IDs")
+        if any(item.noteID is not None and item.noteID not in note_ids for item in self.followups):
+            raise ValueError("A follow-up references a note missing from the backup")
+        return self
+
+
+class BackupRestoreResponse(BaseModel):
+    restoredNotes: int
+    restoredFollowups: int
+    skippedNotes: int
+    skippedFollowups: int
+
+
 class FollowupUpdateRequest(BaseModel):
-    descriptionText: str | None = Field(default=None, min_length=1, max_length=512)
+    descriptionText: str | None = Field(default=None, min_length=1, max_length=MAX_TEXT_LENGTH)
     type: str | None = Field(default=None, min_length=1, max_length=64)
 
     @model_validator(mode="after")
@@ -198,7 +238,7 @@ class FollowupUpdateRequest(BaseModel):
 
 
 class SyncNoteRequest(BaseModel):
-    value: str | None = Field(default=None, min_length=1, max_length=512)
+    value: str | None = Field(default=None, min_length=1, max_length=MAX_TEXT_LENGTH)
     summary: str | None = None
     balanceDueAmount: float | None = None
     balanceDueCurrency: str | None = None
@@ -564,6 +604,50 @@ def _call_ai_note_processor(system_prompt: str, user_prompt: str) -> ProcessedNo
         return result
     except (json.JSONDecodeError, ValidationError) as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="AI provider returned invalid extraction JSON") from exc
+
+
+@app.post("/backups/restore", response_model=BackupRestoreResponse)
+def restore_backup(
+    payload: BackupRestoreRequest,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+) -> BackupRestoreResponse:
+    # Check the whole backup before writing. Existing records are never overwritten.
+    existing_notes = {
+        item.id: item for item in db.query(Note).filter(Note.id.in_([n.id for n in payload.notes])).all()
+    }
+    existing_followups = {
+        item.id: item for item in db.query(Followup).filter(
+            Followup.id.in_([f.id for f in payload.followups])
+        ).all()
+    }
+    if any(item.owner_id != user_id for item in [*existing_notes.values(), *existing_followups.values()]):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Backup record IDs conflict with another account")
+
+    for note in payload.notes:
+        if note.id not in existing_notes:
+            db.add(Note(
+                id=note.id, owner_id=user_id, value=note.value, summary=note.summary,
+                balance_due_amount=note.balanceDueAmount, balance_due_currency=note.balanceDueCurrency,
+                categories=note.categories, appointment_timing=note.appointmentTiming,
+                created_at_utc=note.createdAtUTC, edited_at_utc=note.editedAtUTC,
+            ))
+    for followup in payload.followups:
+        if followup.id not in existing_followups:
+            db.add(Followup(
+                id=followup.id, owner_id=user_id, note_id=followup.noteID,
+                description_text=followup.descriptionText, type=followup.type,
+                completed=followup.isCompleted,
+                created_at_utc=followup.createdAtUTC, edited_at_utc=followup.editedAtUTC,
+            ))
+
+    # One transaction prevents a failed restore from leaving half a backup saved.
+    db.commit()
+    return BackupRestoreResponse(
+        restoredNotes=len(payload.notes) - len(existing_notes),
+        restoredFollowups=len(payload.followups) - len(existing_followups),
+        skippedNotes=len(existing_notes), skippedFollowups=len(existing_followups),
+    )
 
 
 @app.post("/notes", response_model=NoteResponse, status_code=status.HTTP_201_CREATED)

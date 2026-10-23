@@ -4,13 +4,13 @@ import os
 import json
 from pathlib import Path
 from datetime import datetime
+from tempfile import TemporaryDirectory
 from urllib.error import URLError
 
 import pytest
 
-TEST_DB_PATH = Path("/workspace/test_app.db")
-if TEST_DB_PATH.exists():
-    TEST_DB_PATH.unlink()
+TEST_DB_DIRECTORY = TemporaryDirectory(prefix="catalyst-api-tests-")
+TEST_DB_PATH = Path(TEST_DB_DIRECTORY.name) / "test_app.db"
 os.environ["DATABASE_URL"] = f"sqlite:///{TEST_DB_PATH}"
 
 from fastapi.testclient import TestClient  # noqa: E402
@@ -49,6 +49,8 @@ def _client_lifespan() -> None:
     with TestClient(app) as test_client:
         client = test_client
         yield
+    engine.dispose()
+    TEST_DB_DIRECTORY.cleanup()
 
 
 def _reset_db() -> None:
@@ -60,6 +62,90 @@ def test_status_endpoint() -> None:
     response = client.get("/status")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+def _export_backup(headers: dict[str, str]) -> dict:
+    """Match the version 1 ZIP's notes.json produced by the iOS app."""
+    notes = client.get("/notes", headers=headers).json()
+    followups = client.get("/followups", headers=headers).json()
+    for item in followups:
+        item["isCompleted"] = item.pop("completed")
+    return {
+        "formatVersion": 1, "exportedAtUTC": "2026-10-23T17:00:00Z",
+        "notes": notes, "followups": followups,
+    }
+
+
+def test_backup_restores_deleted_records_and_repeat_import_is_idempotent() -> None:
+    headers = {"Authorization": f"Bearer {_register_and_login('backup-roundtrip')}"}
+    note = client.post("/notes", headers=headers, json={
+        "value": "Export/delete/restore test", "summary": "Saved summary",
+        "balanceDueAmount": 24.50, "balanceDueCurrency": "CAD",
+        "categories": ["Follow-up"], "appointmentTiming": "Next week",
+    }).json()
+    followup = client.post("/followups", headers=headers, json={
+        "descriptionText": "Call clinic", "type": "Call", "noteID": note["id"],
+    }).json()
+    client.patch(f"/followups/{followup['id']}/completion", headers=headers, json={"completed": True})
+    backup = _export_backup(headers)
+    assert client.delete(f"/notes/{note['id']}", headers=headers).status_code == 204
+    assert client.get("/notes", headers=headers).json() == []
+    assert client.get("/followups", headers=headers).json() == []
+
+    restored = client.post("/backups/restore", headers=headers, json=backup)
+    assert restored.status_code == 200
+    assert restored.json() == {"restoredNotes": 1, "restoredFollowups": 1, "skippedNotes": 0, "skippedFollowups": 0}
+    assert _export_backup(headers) == backup  # IDs, dates, summaries, links and completion survive.
+
+    client.put(f"/notes/{note['id']}", headers=headers, json={"value": "Newer edit"})
+    repeated = client.post("/backups/restore", headers=headers, json=backup)
+    assert repeated.json() == {"restoredNotes": 0, "restoredFollowups": 0, "skippedNotes": 1, "skippedFollowups": 1}
+    assert client.get("/notes", headers=headers).json()[0]["value"] == "Newer edit"
+    assert len(client.get("/followups", headers=headers).json()) == 1
+
+
+@pytest.mark.parametrize("invalid_part", ["version", "duplicate", "missing_note", "empty_text"])
+def test_backup_rejects_invalid_records_without_partial_restore(invalid_part: str) -> None:
+    headers = {"Authorization": f"Bearer {_register_and_login('backup-' + invalid_part)}"}
+    note = client.post("/notes", headers=headers, json={"value": "Original"}).json()
+    client.post("/followups", headers=headers, json={
+        "descriptionText": "Call clinic", "type": "Call", "noteID": note["id"],
+    })
+    backup = _export_backup(headers)
+    client.delete(f"/notes/{note['id']}", headers=headers)
+    if invalid_part == "version":
+        backup["formatVersion"] = 2
+    elif invalid_part == "duplicate":
+        backup["notes"].append(dict(backup["notes"][0]))
+    elif invalid_part == "missing_note":
+        backup["followups"][0]["noteID"] = "missing"
+    else:
+        backup["notes"][0]["value"] = ""
+    assert client.post("/backups/restore", headers=headers, json=backup).status_code == 422
+    assert client.get("/notes", headers=headers).json() == []
+    assert client.get("/followups", headers=headers).json() == []
+
+
+def test_backup_requires_authentication_and_rejects_other_account_ids() -> None:
+    owner = {"Authorization": f"Bearer {_register_and_login('backup-owner')}"}
+    other = {"Authorization": f"Bearer {_register_and_login('backup-other')}"}
+    client.post("/notes", headers=owner, json={"value": "Owner note"})
+    backup = _export_backup(owner)
+    assert client.post("/backups/restore", json=backup).status_code == 401
+    # A new record preceding a conflict must not be partially committed.
+    backup["notes"].insert(0, {**backup["notes"][0], "id": "new-id"})
+    assert client.post("/backups/restore", headers=other, json=backup).status_code == 409
+    assert client.get("/notes", headers=other).json() == []
+    assert len(client.get("/notes", headers=owner).json()) == 1
+
+
+def test_backup_rejects_followup_id_owned_by_other_account() -> None:
+    owner = {"Authorization": f"Bearer {_register_and_login('backup-followup-owner')}"}
+    other = {"Authorization": f"Bearer {_register_and_login('backup-followup-other')}"}
+    client.post("/followups", headers=owner, json={"descriptionText": "Standalone", "type": "Call"})
+    backup = _export_backup(owner)
+    assert client.post("/backups/restore", headers=other, json=backup).status_code == 409
+    assert client.get("/followups", headers=other).json() == []
 
 
 def test_sample_seed_disabled_by_default(monkeypatch) -> None:
@@ -562,18 +648,112 @@ def test_notes_require_authentication() -> None:
     assert client.delete("/notes/some-id").status_code == 401
 
 
-def test_note_value_max_length_validation() -> None:
-    token = _register_and_login("maxlength")
+@pytest.mark.parametrize("length", [513, 2048])
+def test_note_text_length_create_update_and_sync(length: int) -> None:
+    token = _register_and_login(f"notelength{length}")
     headers = {"Authorization": f"Bearer {token}"}
 
-    ok_value = "a" * 512
-    too_long = "b" * 513
+    created = client.post("/notes", json={"value": "a" * length}, headers=headers)
+    assert created.status_code == 201
+    note_id = created.json()["id"]
+    assert client.get(f"/notes/{note_id}", headers=headers).json()["value"] == "a" * length
 
-    ok_create = client.post("/notes", json={"value": ok_value}, headers=headers)
-    assert ok_create.status_code == 201
+    updated = client.put(f"/notes/{note_id}", json={"value": "b" * length}, headers=headers)
+    assert updated.status_code == 200
+    assert client.get(f"/notes/{note_id}", headers=headers).json()["value"] == "b" * length
 
-    bad_create = client.post("/notes", json={"value": too_long}, headers=headers)
+    synced = client.post(
+        f"/sync/note/{note_id}",
+        json={"value": "c" * length, "followups": []},
+        headers=headers,
+    )
+    assert synced.status_code == 200
+    assert client.get(f"/notes/{note_id}", headers=headers).json()["value"] == "c" * length
+
+
+@pytest.mark.parametrize("length", [0, 2049])
+def test_invalid_note_length_preserves_existing_data(length: int) -> None:
+    token = _register_and_login(f"badnotelength{length}")
+    headers = {"Authorization": f"Bearer {token}"}
+    note = client.post("/notes", json={"value": "Keep this note"}, headers=headers).json()
+    note_id = note["id"]
+    followup = client.post(
+        f"/notes/{note_id}/followups",
+        json={"descriptionText": "Keep this follow-up", "type": "task"},
+        headers=headers,
+    ).json()
+    value = "x" * length
+
+    bad_create = client.post("/notes", json={"value": value}, headers=headers)
     assert bad_create.status_code == 422
+    bad_update = client.put(f"/notes/{note_id}", json={"value": value}, headers=headers)
+    assert bad_update.status_code == 422
+    bad_sync = client.post(
+        f"/sync/note/{note_id}", json={"value": value, "followups": []}, headers=headers
+    )
+    assert bad_sync.status_code == 422
+    assert client.get("/notes", headers=headers).json() == [note]
+    assert client.get(f"/notes/{note_id}/followups", headers=headers).json() == [followup]
+
+
+@pytest.mark.parametrize("length", [513, 2048])
+def test_followup_text_length_create_update_and_sync(length: int) -> None:
+    token = _register_and_login(f"followuplength{length}")
+    headers = {"Authorization": f"Bearer {token}"}
+    note_id = client.post("/notes", json={"value": "test note"}, headers=headers).json()["id"]
+
+    for path in ("/followups", f"/notes/{note_id}/followups"):
+        created = client.post(
+            path, json={"descriptionText": "a" * length, "type": "task"}, headers=headers
+        )
+        assert created.status_code == 201
+        followup_id = created.json()["id"]
+        saved = next(f for f in client.get("/followups", headers=headers).json() if f["id"] == followup_id)
+        assert saved["descriptionText"] == "a" * length
+
+        updated = client.patch(
+            f"/followups/{followup_id}", json={"descriptionText": "b" * length}, headers=headers
+        )
+        assert updated.status_code == 200
+        saved = next(f for f in client.get("/followups", headers=headers).json() if f["id"] == followup_id)
+        assert saved["descriptionText"] == "b" * length
+
+    synced = client.post(
+        f"/sync/note/{note_id}",
+        json={"followups": [{"descriptionText": "c" * length, "type": "task"}]},
+        headers=headers,
+    )
+    assert synced.status_code == 200
+    saved_followups = client.get(f"/notes/{note_id}/followups", headers=headers).json()
+    assert len(saved_followups) == 1
+    assert saved_followups[0]["descriptionText"] == "c" * length
+
+
+@pytest.mark.parametrize("length", [0, 2049])
+def test_invalid_followup_length_preserves_existing_data(length: int) -> None:
+    token = _register_and_login(f"badfollowuplength{length}")
+    headers = {"Authorization": f"Bearer {token}"}
+    note = client.post("/notes", json={"value": "Keep this note"}, headers=headers).json()
+    note_id = note["id"]
+    followup = client.post(
+        f"/notes/{note_id}/followups",
+        json={"descriptionText": "Keep this follow-up", "type": "task"},
+        headers=headers,
+    ).json()
+    payload = {"descriptionText": "x" * length, "type": "task"}
+
+    for path in ("/followups", f"/notes/{note_id}/followups"):
+        assert client.post(path, json=payload, headers=headers).status_code == 422
+    bad_update = client.patch(f"/followups/{followup['id']}", json=payload, headers=headers)
+    assert bad_update.status_code == 422
+    bad_sync = client.post(
+        f"/sync/note/{note_id}",
+        json={"value": "Must not be saved", "followups": [payload]},
+        headers=headers,
+    )
+    assert bad_sync.status_code == 422
+    assert client.get(f"/notes/{note_id}", headers=headers).json() == note
+    assert client.get("/followups", headers=headers).json() == [followup]
 
 
 def test_note_creation_time_is_recorded_in_db() -> None:
@@ -827,7 +1007,7 @@ def test_followup_validation_for_bad_payloads() -> None:
 
     too_long_description = client.post(
         f"/notes/{note_id}/followups",
-        json={"descriptionText": "a" * 513, "type": "task"},
+        json={"descriptionText": "a" * 2049, "type": "task"},
         headers=headers,
     )
     assert too_long_description.status_code == 422
@@ -982,7 +1162,7 @@ def test_update_followup_validation_for_bad_payloads() -> None:
 
     too_long_description = client.patch(
         f"/followups/{followup_id}",
-        json={"descriptionText": "a" * 513},
+        json={"descriptionText": "a" * 2049},
         headers=headers,
     )
     assert too_long_description.status_code == 422

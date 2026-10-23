@@ -84,6 +84,7 @@ docker compose up --build
 
 - `GET /user`
 - `GET /sync/user` returns `{ "notes": [...], "followups": [...], "serverTimeUTC": "..." }` for authenticated user
+- `POST /backups/restore` accepts the app's version 1 `notes.json` backup (`formatVersion`, `exportedAtUTC`, `notes`, `followups`). Restores missing records in one transaction, skips existing records, and returns `restoredNotes`, `restoredFollowups`, `skippedNotes`, and `skippedFollowups`. IDs belonging to another account and invalid references are rejected. Follow-ups use the backup field `isCompleted`.
 - `POST /sync/note/{note_id}` updates an owned note and fully replaces that note's follow-ups using `{ ...noteFieldsToPatch, "followups": [{ "descriptionText": "...", "type": "..." }, ...] }` (`"followups": []` deletes all follow-ups for the note)
 - `POST /change-password` with JSON body `{ "current_password": "...", "new_password": "..." }`
 - `POST /notes` with JSON body
@@ -101,6 +102,8 @@ docker compose up --build
 - `PATCH /followups/{followup_id}` with `{ "descriptionText": "...?", "type": "...?" }` to edit one or both attributes (at least one field required)
 - `PATCH /followups/{followup_id}/completion` with `{ "completed": true | false }` to mark/unmark completion
 - `DELETE /followups/{followup_id}` delete one owned follow-up
+
+Note text (`value`) and follow-up descriptions (`descriptionText`) accept 1 to 2,048 characters, matching the iOS editors. The same limit applies when creating, editing or syncing these records.
 
 Password validation during registration is implemented through an extensible `validate_password()` function (currently enforcing minimum length 12, designed for adding future checks like breached-password checks).
 
