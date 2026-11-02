@@ -566,8 +566,8 @@ def test_note_value_max_length_validation() -> None:
     token = _register_and_login("maxlength")
     headers = {"Authorization": f"Bearer {token}"}
 
-    ok_value = "a" * 512
-    too_long = "b" * 513
+    ok_value = "a" * 2048
+    too_long = "b" * 2049
 
     ok_create = client.post("/notes", json={"value": ok_value}, headers=headers)
     assert ok_create.status_code == 201
@@ -827,7 +827,7 @@ def test_followup_validation_for_bad_payloads() -> None:
 
     too_long_description = client.post(
         f"/notes/{note_id}/followups",
-        json={"descriptionText": "a" * 513, "type": "task"},
+        json={"descriptionText": "a" * 2049, "type": "task"},
         headers=headers,
     )
     assert too_long_description.status_code == 422
@@ -982,7 +982,7 @@ def test_update_followup_validation_for_bad_payloads() -> None:
 
     too_long_description = client.patch(
         f"/followups/{followup_id}",
-        json={"descriptionText": "a" * 513},
+        json={"descriptionText": "a" * 2049},
         headers=headers,
     )
     assert too_long_description.status_code == 422

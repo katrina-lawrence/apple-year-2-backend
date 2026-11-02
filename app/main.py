@@ -27,6 +27,8 @@ JWT_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "60"))
 JWT_REFRESH_EXPIRE_DAYS = int(os.getenv("JWT_REFRESH_EXPIRE_DAYS", "30"))
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./app.db")
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
+# Match the note and follow-up description editors in the iOS app.
+MAX_TEXT_LENGTH = 2048
 
 password_hash = PasswordHash.recommended()
 
@@ -128,7 +130,7 @@ class StatusResponse(BaseModel):
 
 
 class NoteCreateRequest(BaseModel):
-    value: str = Field(min_length=1, max_length=512)
+    value: str = Field(min_length=1, max_length=MAX_TEXT_LENGTH)
     summary: str | None = None
     balanceDueAmount: float | None = None
     balanceDueCurrency: str | None = None
@@ -137,7 +139,7 @@ class NoteCreateRequest(BaseModel):
 
 
 class NoteUpdateRequest(BaseModel):
-    value: str | None = Field(default=None, min_length=1, max_length=512)
+    value: str | None = Field(default=None, min_length=1, max_length=MAX_TEXT_LENGTH)
     summary: str | None = None
     balanceDueAmount: float | None = None
     balanceDueCurrency: str | None = None
@@ -164,7 +166,7 @@ class NoteResponse(BaseModel):
 
 
 class CreateFollowupRequest(BaseModel):
-    descriptionText: str = Field(min_length=1, max_length=512)
+    descriptionText: str = Field(min_length=1, max_length=MAX_TEXT_LENGTH)
     type: str = Field(min_length=1, max_length=64)
 
 
@@ -187,7 +189,7 @@ class FollowupCompletionRequest(BaseModel):
 
 
 class FollowupUpdateRequest(BaseModel):
-    descriptionText: str | None = Field(default=None, min_length=1, max_length=512)
+    descriptionText: str | None = Field(default=None, min_length=1, max_length=MAX_TEXT_LENGTH)
     type: str | None = Field(default=None, min_length=1, max_length=64)
 
     @model_validator(mode="after")
@@ -198,7 +200,7 @@ class FollowupUpdateRequest(BaseModel):
 
 
 class SyncNoteRequest(BaseModel):
-    value: str | None = Field(default=None, min_length=1, max_length=512)
+    value: str | None = Field(default=None, min_length=1, max_length=MAX_TEXT_LENGTH)
     summary: str | None = None
     balanceDueAmount: float | None = None
     balanceDueCurrency: str | None = None
